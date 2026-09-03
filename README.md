@@ -39,7 +39,6 @@ The main focus is maintaining consistent inventory when multiple bookings access
 
 
 
-
 ## 3. Key Assumptions
 
 * Each flight has one inventory record identified by `flight_id`.
@@ -69,9 +68,15 @@ A reconciliation process will compare the stored inventory with active booking r
 
 
 
+
+
+
+
+
+
 ## 5. Project Structure
 
-
+```text
 airline-inventory-engine/
 ├── app/
 │   ├── models/
@@ -82,10 +87,11 @@ airline-inventory-engine/
 ├── README.md
 ├── DESIGN.md
 └── requirements.txt
+```
 
 The application logic will be separated into API, service, database, and model layers. Tests will cover the main booking, concurrency, cancellation, rebooking, overbooking, and reconciliation scenarios.
 
-#(there may some changes in the structure)
+
 
 
 
@@ -123,6 +129,9 @@ Create the PostgreSQL database and run the required database migrations/setup sc
 
 
 
+
+
+
 ## 7. Running the Project
 
 After completing the setup and configuring the database, start the application using:
@@ -132,6 +141,13 @@ After completing the setup and configuring the database, start the application u
 ```
 
 The API will expose endpoints for flight inventory, booking, cancellation, rebooking, overbooking configuration, bump resolution, and reconciliation.
+
+
+
+
+
+
+
 
 
 
@@ -148,6 +164,13 @@ The API will expose endpoints for flight inventory, booking, cancellation, reboo
 | `PATCH` | `/flights/{flight_id}/overbooking` | Update the flight's overbooking limit          |
 | `POST`  | `/flights/{flight_id}/bump`        | Resolve passengers when the flight is oversold |
 | `GET`   | `/reconciliation`                  | Check inventory against booking records        |
+
+
+
+
+
+
+
 
 
 
@@ -174,16 +197,20 @@ Concurrency tests will verify that multiple requests cannot successfully claim t
 
 
 
+
+
+
+
 ## 10. Demo Scenarios
 
 The final demo will cover the following scenarios:
 
-1. Last-seat concurrency — Two concurrent bookings attempt to claim the last available inventory. Only one should succeed.
+1. **Last-seat concurrency** — Two concurrent bookings attempt to claim the last available inventory. Only one should succeed.
 
-2. Shared-leg concurrency — Different itineraries attempt to book the same flight leg concurrently without causing an oversell.
+2. **Shared-leg concurrency** — Different itineraries attempt to book the same flight leg concurrently without causing an oversell.
 
-3. Multi-leg cancellation — Cancelling a booking releases the inventory used by its legs and leaves the booking records in a consistent state.
+3. **Multi-leg cancellation** — Cancelling a booking releases the inventory used by its legs and leaves the booking records in a consistent state.
 
-4. Overbooking limit change — Change the overbooking limit of a flight while bookings already exist and verify that the new limit is applied.
+4. **Overbooking limit change** — Change the overbooking limit of a flight while bookings already exist and verify that the new limit is applied.
 
-5. Reconciliation — Compare the maintained flight inventory with active booking records and confirm that the final state is consistent.
+5. **Reconciliation** — Compare the maintained flight inventory with active booking records and confirm that the final state is consistent.
