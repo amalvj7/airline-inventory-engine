@@ -1,236 +1,485 @@
-# Design Document
+# Design Document — Airline Multi-Leg Seat Inventory & Overbooking Engine
 
-## 1. Architecture Overview
+## 1. Problem Framing
 
-The system will be implemented as a backend API with a relational database.
+The brief's difficulty is not booking flights. It is that **one physical seat inventory
+is shared by many different itineraries**, and that we deliberately sell more seats than
+the aircraft has.
 
-```text
-Client
-  |
-  v
-API Layer
-  |
-  v
-Service Layer
-  |
-  v
-PostgreSQL Database
-```
+Three properties follow from that, and every design decision below exists to protect one
+of them:
 
-The API layer handles requests, while the service layer contains booking, cancellation, rebooking, overbooking, and reconciliation logic.
+| Invariant | Meaning |
+|---|---|
+| **I1 — No inconsistent oversell** | A flight's booked count never exceeds its booking limit, no matter how many bookings race for the last seat. |
+| **I2 — Itinerary integrity** | A booking is confirmed on *all* its legs or *none*. No booking is ever left holding a partial itinerary. |
+| **I3 — Counter truth** | The stored inventory counter always equals the number of booking legs that actually consume a seat. |
 
-PostgreSQL will be responsible for maintaining the shared flight inventory and ensuring concurrent booking operations are handled safely using transactions and row-level locking.
+I1 is enforced by pessimistic row locks. I2 by transaction boundaries and an atomic
+cancellation policy. I3 is verified, not assumed — see §9, Reconciliation.
 
-## 2. Data Model
+---
 
-The system uses five main entities:
-
-* `PASSENGER` — stores passenger details.
-* `BOOKING` — represents a passenger's booking/itinerary.
-* `BOOKING_LEG` — connects a booking to each flight used by the itinerary.
-* `FLIGHT` — stores individual flight-leg information.
-* `FLIGHT_INVENTORY` — stores the physical capacity and booking inventory for each flight.
-
-### Relationships
+## 2. Architecture Overview
 
 ```text
-PASSENGER 1 ──── N BOOKING
-BOOKING   1 ──── N BOOKING_LEG
-FLIGHT    1 ──── N BOOKING_LEG
-FLIGHT    1 ──── 1 FLIGHT_INVENTORY
+        Client / Demo Runner
+                 |
+                 v
+  ┌────────────────────────────────┐
+  │  API Layer (FastAPI)           │   request validation, HTTP mapping
+  │  Pydantic request/response     │
+  └───────────────┬────────────────┘
+                  v
+  ┌────────────────────────────────┐
+  │  Service Layer                 │   booking, cancellation, rebooking,
+  │  transaction boundaries live   │   overbooking, bump, reconciliation
+  │  here — one tx per operation   │
+  └───────────────┬────────────────┘
+                  v
+  ┌────────────────────────────────┐
+  │  Repository / SQLAlchemy 2.0   │   row locking (SELECT ... FOR UPDATE)
+  └───────────────┬────────────────┘
+                  v
+         PostgreSQL 15 (REPEATABLE READ)
 ```
 
-`BOOKING_LEG` is used to represent the many-to-many relationship between bookings and flights. The `sequence` field maintains the order of legs in a multi-leg itinerary.
+**Why this split.** The transaction boundary sits in the service layer, never in the API
+layer and never in the repository. That means every inventory mutation has exactly one
+place where it begins and commits, which is what makes the concurrency argument
+reviewable. Repositories issue locked reads and writes but never commit.
 
-`FLIGHT_INVENTORY.flight_id` is both the primary key and a foreign key to `FLIGHT.id`, since each flight has one inventory record.
+**Why PostgreSQL.** The core requirement is a correct concurrent decrement of a shared
+counter. That is a transactional problem, and Postgres gives us `SELECT ... FOR UPDATE`
+row locks directly. See §10 for the trade-off against optimistic concurrency.
 
-### Main Fields
+**Why FastAPI.** Pydantic models double as the API contract deliverable — request and
+response schemas are generated from the same code that validates them, so `/docs` cannot
+drift from the implementation.
+
+---
+
+## 3. Data Model
+
+### 3.1 Entities
+
+```text
+PASSENGER 1 ──── N BOOKING 1 ──── N BOOKING_LEG N ──── 1 FLIGHT 1 ──── 1 FLIGHT_INVENTORY
+```
+
+`BOOKING_LEG` is the junction that makes shared inventory work: many itineraries point at
+the same `FLIGHT` row, and therefore compete for the same single `FLIGHT_INVENTORY` row.
+That one row is the contention point, and it is exactly what we lock.
+
+### 3.2 Schema
 
 ```text
 PASSENGER
-- id (PK)
-- name
+- id                 UUID PK
+- name               text NOT NULL
+- tier               text NOT NULL DEFAULT 'STANDARD'   -- PLATINUM|GOLD|STANDARD
+- created_at         timestamptz NOT NULL
 
 BOOKING
-- id (PK)
-- passenger_id (FK)
-- status
-- created_at
+- id                 UUID PK
+- passenger_id       UUID FK -> PASSENGER(id)
+- status             text NOT NULL       -- CONFIRMED|CANCELLED|BUMPED_PENDING
+- idempotency_key    text UNIQUE NULL    -- safe retries, see §5.4
+- created_at         timestamptz NOT NULL
 
 BOOKING_LEG
-- id (PK)
-- booking_id (FK)
-- flight_id (FK)
-- sequence
-- status
+- id                 UUID PK
+- booking_id         UUID FK -> BOOKING(id)
+- flight_id          UUID FK -> FLIGHT(id)
+- sequence           int NOT NULL        -- 1, 2, 3 ... order within itinerary
+- fare_class         text NOT NULL       -- Y|M|B, feeds bump priority
+- status             text NOT NULL       -- CONFIRMED|BUMPED|REBOOKED|CANCELLED
+- UNIQUE (booking_id, sequence)
+- INDEX (flight_id, status)              -- reconciliation + bump queries
 
 FLIGHT
-- id (PK)
-- flight_number
-- origin
-- destination
-- departure_time
-- arrival_time
-- status
+- id                 UUID PK
+- flight_number      text NOT NULL
+- origin             char(3) NOT NULL
+- destination        char(3) NOT NULL
+- departure_time     timestamptz NOT NULL
+- arrival_time       timestamptz NOT NULL
+- status             text NOT NULL       -- SCHEDULED|DEPARTED|CANCELLED
 
 FLIGHT_INVENTORY
-- flight_id (PK, FK)
-- physical_capacity
-- overbooking_factor
-- booking_limit
-- remaining_inventory
+- flight_id          UUID PK, FK -> FLIGHT(id)
+- physical_capacity  int NOT NULL CHECK (physical_capacity > 0)
+- overbooking_factor numeric(4,3) NOT NULL DEFAULT 0 CHECK (overbooking_factor >= 0)
+- booking_limit      int NOT NULL        -- derived, see §4.1
+- booked_count       int NOT NULL DEFAULT 0 CHECK (booked_count >= 0)
+- version            int NOT NULL DEFAULT 0   -- observability only, not for locking
 ```
 
-## 3. Inventory & Overbooking Design
+### 3.3 One counter, not two
 
-Each flight has a separate inventory record. The inventory is based on the physical capacity of the aircraft and a configurable overbooking factor.
+`FLIGHT_INVENTORY` stores **`booked_count`**, and remaining availability is *derived*:
 
 ```text
-booking_limit = physical_capacity × (1 + overbooking_factor)
+remaining = booking_limit - booked_count
 ```
 
-For example:
+This is deliberate. An earlier draft stored `remaining_inventory` directly, which breaks
+the moment the overbooking factor changes: recomputing remaining requires knowing how many
+seats are already sold, and that number was not stored. Storing `booked_count` means every
+operation moves exactly one counter by ±1, and every derived value stays computable from it.
+
+**`remaining` may legitimately be negative.** If capacity is 100, factor 10%, and 108 seats
+are sold, lowering the factor to 0% sets the limit to 100 while 108 bookings remain valid —
+remaining is −8. We do not cancel existing bookings (§6.2), so this state is reachable by
+design. Consequences:
+
+- No `CHECK (remaining >= 0)` constraint may exist.
+- The availability test is always `booked_count < booking_limit`, never an equality check.
+- Reconciliation treats a negative remaining as **correct**, not as a mismatch.
+
+### 3.4 Which statuses consume inventory
+
+This is the single most important definition in the document, because reconciliation and
+every availability check depend on it.
+
+| `BOOKING_LEG.status` | Consumes a seat | Meaning |
+|---|:---:|---|
+| `CONFIRMED` | **yes** | Normal held seat. |
+| `BUMPED` | **yes** | Denied boarding, not yet resolved. Passenger still holds this seat until rebooked or cancelled. |
+| `REBOOKED` | no | Historical record; the seat moved to a different flight. |
+| `CANCELLED` | no | Released. |
+
+**`BOOKING_LEG.status` is the sole source of truth for inventory.** `BOOKING.status` is a
+convenience roll-up for API responses and is never consulted when computing inventory. This
+removes the entire class of "booking says cancelled but leg says confirmed" ambiguity.
+
+Holding inventory on `BUMPED` is a deliberate choice: it means a passenger always occupies
+exactly one seat somewhere in the system, and the flight is departing anyway, so there is no
+one left to sell a released seat to.
+
+---
+
+## 4. Overbooking Policy
+
+### 4.1 Limit derivation
 
 ```text
-Physical capacity = 100
-Overbooking factor = 10%
-
-Booking limit = 110
+booking_limit = floor(physical_capacity × (1 + overbooking_factor))
 ```
 
-`remaining_inventory` represents how many additional bookings can currently be accepted.
+`floor`, chosen explicitly: 50 seats × 1.15 = 57.5 → **57**. Rounding down never sells a
+seat the policy did not authorise. This is asserted in a unit test rather than left to
+whichever language rounds which way.
 
-The overbooking factor is configurable for each flight rather than using a global value.
-
-If the overbooking limit is reduced after bookings already exist, existing bookings will not be automatically cancelled. New bookings will be restricted based on the updated limit, and the flight can be marked as oversold for further handling.
-
-At departure, if confirmed passengers exceed physical capacity, the bump-resolution process will be used according to the priority rule defined for this project.
-
-## 4. Booking & Transaction Flow
-
-A booking request may contain one or more flight legs. All required legs must be available before the booking is confirmed.
-
-For a multi-leg booking, the operation follows this flow:
+Worked example:
 
 ```text
-Booking Request
-      |
-      v
-Identify required flight legs
-      |
-      v
-Start Database Transaction
-      |
-      v
-Lock inventory rows for all legs
-      |
-      v
-Check remaining inventory
-      |
-   ┌──┴──┐
-   |     |
-Available  Not Available
+physical_capacity  = 100
+overbooking_factor = 0.10
+booking_limit      = 110      -- 10 seats may be sold beyond the aircraft
+```
+
+The factor is a per-flight column with no global default beyond `0`. There is no hardcoded
+buffer anywhere in the codebase — a flight with factor `0` simply never overbooks.
+
+### 4.2 Two limits, two enforcement points
+
+The distinction that makes bumping necessary:
+
+| Number | Value | Enforced |
+|---|---|---|
+| `booking_limit` | 110 | At **booking time** — how many we will sell. |
+| `physical_capacity` | 100 | At **departure** — how many can board. |
+
+The gap between them is the bump population.
+
+### 4.3 Changing the factor mid-flight
+
+`PATCH /flights/{id}/overbooking` runs **inside a transaction that takes the same
+`FOR UPDATE` lock on `FLIGHT_INVENTORY`** as a booking does. This is what makes demo
+scenario (d) meaningful: the limit change serialises against in-flight booking
+transactions, so there is no window where a booking is validated against a stale limit.
+
+The operation recomputes `booking_limit` from the new factor and leaves `booked_count`
+untouched. Existing confirmed bookings are never auto-cancelled — an airline does not
+revoke a sold ticket because policy changed. If the new limit falls below `booked_count`,
+the flight is simply oversold and resolves at departure through bump handling.
+
+---
+
+## 5. Booking Flow
+
+### 5.1 Algorithm
+
+```text
+POST /bookings  { passenger_id, legs: [{flight_id, fare_class}, ...] }
+        |
+        v
+  Validate: non-empty, no duplicate flight_id, flights SCHEDULED
+        |
+        v
+  BEGIN TRANSACTION
+        |
+        v
+  SELECT * FROM flight_inventory
+   WHERE flight_id = ANY(:ids)
+   ORDER BY flight_id            <-- deterministic lock order
+   FOR UPDATE                    <-- blocks competing bookings
+        |
+        v
+  For every leg:  booked_count < booking_limit ?
+        |
+   ┌────┴────┐
+  all         any
+  pass        fail
+   |           |
+   v           v
+ UPDATE      ROLLBACK
+ booked_count  → 409 with the
+ += 1 per leg    specific full leg
+   |
+   v
+ INSERT booking + booking_legs (CONFIRMED)
+   |
+   v
+ COMMIT → 201
+```
+
+### 5.2 Why the lock comes before the check
+
+Every inventory path in this system is **lock → read → decide → write → commit**, never
+check-then-lock. A check performed before acquiring the lock is a time-of-check /
+time-of-use race: two requests both read `booked_count = 109`, both conclude a seat is
+free, both write `110`. Locking first forces the second transaction to block until the
+first commits, so it re-reads the *post-commit* value and correctly rejects.
+
+### 5.3 Deadlock avoidance
+
+Multi-leg bookings lock several rows. Two itineraries sharing legs in opposite orders
+(A→B and B→A) would deadlock if each locked in itinerary order. All lock acquisition is
+therefore sorted by `flight_id` ascending, in a single statement, so no two transactions
+can hold locks in conflicting order. Duplicate `flight_id`s in one request are rejected
+at validation, which also prevents a request from double-decrementing a single flight.
+
+### 5.4 Idempotency
+
+`POST /bookings` accepts an optional `Idempotency-Key` header stored as a unique column on
+`BOOKING`. A retry with the same key returns the original booking rather than consuming a
+second seat. Without this, a client timeout on a slow lock wait silently sells two seats.
+
+---
+
+## 6. Cancellation
+
+### 6.1 Policy: itineraries are atomic
+
+**Cancelling any leg of a multi-leg booking cancels the entire booking**, releasing
+inventory on every leg it touches, in one transaction.
+
+This directly answers the brief's constraint that cancelling one leg "must not silently
+leave the other leg's inventory or the passenger's record in an inconsistent state." The
+alternative — leaving orphan legs and reconciling later — creates a state where a passenger
+holds a seat on a flight they cannot reach. A confirmed leg from a connection the passenger
+can no longer make is not a valid booking; it is inventory withheld from someone who could
+use it.
+
+Partial modification of an itinerary is available through **rebooking** (§7), which
+*replaces* a leg rather than removing it, so the itinerary is never left with a gap.
+
+```text
+POST /bookings/{id}/cancel        (leg_id optional — scope is always the itinerary)
+        |
+        v
+  BEGIN
+  Lock all flight_inventory rows for the booking's consuming legs (ORDER BY flight_id)
+        |
+        v
+  UPDATE booking_leg SET status='CANCELLED'
+   WHERE booking_id=:id AND status IN ('CONFIRMED','BUMPED')
+        |
+        v
+  Release booked_count -= 1 per row actually updated   <-- see §6.3
+        |
+        v
+  UPDATE booking SET status='CANCELLED'
+  COMMIT
+```
+
+### 6.2 Cancellation is never triggered by policy changes
+
+Reducing an overbooking factor does not cancel anyone (§4.3). Cancellation happens only on
+explicit request or as the resolution of an unresolvable bump.
+
+### 6.3 Double-cancel safety
+
+Inventory release is **conditional on the status transition actually occurring**. The
+`UPDATE ... WHERE status IN ('CONFIRMED','BUMPED')` returns a row count, and
+`booked_count` is decremented by exactly that count. A second cancel request updates zero
+rows and therefore releases zero seats. Without this guard, a retried cancel permanently
+corrupts the flight's counter — the counter drifts down and the flight silently oversells
+forever.
+
+---
+
+## 7. Rebooking
+
+Rebooking moves one leg from flight X to flight Y while keeping the itinerary intact.
+
+```text
+POST /bookings/{id}/rebook  { leg_id, new_flight_id }
+        |
+        v
+  BEGIN
+        |
+        v
+  SELECT ... FOR UPDATE on {old_flight_id, new_flight_id}
+   ORDER BY flight_id            <-- BOTH rows, one sorted statement
+        |
+        v
+  new flight: booked_count < booking_limit ?
+        |
+   ┌────┴────┐
+  yes        no
    |          |
    v          v
-Reserve     Rollback
-all legs    transaction
+ old.booked_count -= 1      ROLLBACK → 409
+ new.booked_count += 1      (leg stays on original flight,
+ old leg  -> REBOOKED        booking untouched)
+ new leg  -> CONFIRMED
    |
    v
-Create booking + booking legs
-   |
-   v
-Commit
+ COMMIT
 ```
 
-If any required leg does not have available inventory, the complete transaction is rolled back. This prevents a situation where one leg is reserved while another leg of the same itinerary fails.
+Two details matter. First, **both** inventory rows are locked before the availability check
+— an earlier draft checked availability and then locked, which is the TOCTOU race described
+in §5.2. Second, the release and the reserve happen in the same transaction, so a failed
+rebooking cannot leave the passenger holding zero seats or two.
 
-Inventory rows will be locked while they are being checked and updated. This prevents two concurrent booking requests from both successfully claiming the same remaining inventory.
+---
 
-For multiple inventory rows, locks will be acquired in a consistent order to reduce the possibility of deadlocks.
+## 8. Bumped Passenger Resolution
 
-## 5. Cancellation & Rebooking
+### 8.1 What bumping is
 
-### Cancellation
+Because we deliberately sell up to `booking_limit` (110) but the aircraft seats
+`physical_capacity` (100), a full flight can have more confirmed passengers than seats. The
+excess passengers are denied boarding — *bumped* — and must be resolved onto other flights.
 
-Cancelling a booking will update both the booking records and the corresponding flight inventory within a single transaction.
+### 8.2 Selection rule
 
-For a multi-leg booking, all active legs belonging to the booking will be cancelled and their inventory will be released.
+`POST /flights/{id}/bump` computes `overage = consuming_legs − physical_capacity`. If
+`overage <= 0`, it is a no-op. Otherwise it selects exactly `overage` legs by a fully
+deterministic ordering:
 
-If only one leg is cancelled externally, the dependent legs will not be left active without a valid itinerary. The system will either cancel the dependent itinerary or rebook the affected leg according to the available rebooking option.
+```sql
+ORDER BY passenger.tier_rank DESC,      -- STANDARD(3) bumped before GOLD(2), PLATINUM(1)
+         fare_class_rank    DESC,       -- cheapest fare bumped first
+         booking.created_at DESC,       -- last booked, first bumped
+         booking_leg.id     ASC         -- final tie-break: total ordering guaranteed
+```
 
-### Rebooking
+The last clause exists so the rule is a *total* order. Without it, two identical passengers
+make the selection non-deterministic and the demo produces different results on each run,
+which is untestable.
 
-When a flight leg needs to be changed, the system will:
+The policy is intentionally simple — the brief targets inventory consistency, not
+compensation optimisation. It is isolated behind a `BumpPolicy` interface so a different
+rule is a single-class change.
 
-1. Find a suitable replacement flight.
-2. Check availability on the replacement flight.
-3. Lock the required inventory rows.
-4. Release the old flight inventory.
-5. Reserve the replacement flight.
-6. Update the corresponding `BOOKING_LEG`.
+### 8.3 Resolution and cascade
 
-These changes will be performed within a transaction so that a failed rebooking does not leave the booking in a partially updated state.
+A `BUMPED` leg still consumes inventory (§3.4). It resolves one of two ways:
 
-## 6. Bumped Passenger Resolution
+- **Rebooked** onto a later flight with the same origin/destination — inventory moves, the
+  itinerary survives.
+- **Cancelled** when no alternative exists — and because itineraries are atomic (§6.1),
+  **this cascades to the rest of the booking**.
 
-When confirmed passengers exceed the physical capacity of a flight at departure, the system will identify passengers who need to be bumped.
+The cascade is the important case. A passenger on A→B→C who is bumped off A→B cannot use
+their B→C seat. Holding it would withhold inventory from an itinerary that could actually
+fly it. So cancelling the unresolvable bump releases *both* legs, and the downstream seat
+returns to the pool for other itineraries. This is the deepest form of the brief's "what
+happens to dependent legs" question, and it falls out of the atomicity policy rather than
+needing special-case code.
 
-A simple priority-based rule will be used for this project. Passengers with lower priority will be selected first for bumping.
+---
 
-The affected booking leg will be marked as `BUMPED`, and the system will attempt to resolve the passenger through rebooking. If a suitable replacement is not available, the booking will be marked according to the final resolution status.
+## 9. Reconciliation
 
-The bumping policy is intentionally kept simple since the project focuses on inventory management rather than airline revenue or passenger compensation optimization.
-
-## 7. Concurrency Control
-
-Concurrency is handled at the database level using transactions and row-level locking.
-
-Before checking or updating inventory, the relevant `FLIGHT_INVENTORY` rows will be locked. This ensures that two concurrent booking requests cannot both claim the same remaining inventory.
-
-For example, if a flight has only one remaining booking:
+Because `booked_count` is denormalised, it is verified rather than trusted.
 
 ```text
-Request A → Lock inventory → Reserve → Commit
-Request B → Wait for lock → Check inventory → Reject
+GET /reconciliation   →   per-flight report
+
+expected_booked = COUNT(booking_leg
+                        WHERE flight_id = F
+                          AND status IN ('CONFIRMED','BUMPED'))
+
+stored_booked   = flight_inventory.booked_count
+
+              expected == stored  →  PASS
+              expected != stored  →  MISMATCH (drift, expected, stored)
 ```
 
-For multi-leg bookings, all required inventory rows will be locked before making the final availability decision. Locks will be acquired in a consistent order to reduce the possibility of deadlocks.
+The response also reports `remaining = booking_limit − booked_count` and an `oversold`
+flag when `booked_count > physical_capacity`. A negative `remaining` is reported as
+**correct** — it is a valid consequence of a lowered overbooking factor, not drift.
 
-This ensures that the final inventory remains consistent even when multiple bookings access shared flight legs concurrently.
+This check runs as the final assertion of every concurrency test and closes demo scenario
+(e): after races, cancellations, rebookings, bumps and a limit change, the counters still
+match the booking records exactly.
 
-## 8. Reconciliation
+---
 
-A reconciliation check will be used to verify that the maintained flight inventory matches the booking records.
+## 10. Trade-offs
 
-For each flight:
+**Pessimistic row locks over optimistic versioning.** `SELECT ... FOR UPDATE` makes the
+correctness argument short and reviewable, and contention is genuinely high on a last-seat
+race. The cost is that competing bookings block rather than fail fast, and a slow
+transaction holding a popular leg stalls others. Optimistic versioning would scale better
+under low contention but converts every last-seat race into a retry storm. For a booking
+engine where correctness under contention *is* the requirement, blocking is the right
+default. The `version` column is present for observability and would be the migration path.
 
-```text
-Expected remaining inventory
-= booking_limit - active booking legs
-```
+**Denormalised `booked_count` over counting legs on every read.** `COUNT(*)` over
+`booking_leg` would be self-evidently correct and impossible to drift, but it makes every
+availability check scale with total bookings on the flight and still needs the same lock.
+The counter gives O(1) checks; the reconciliation endpoint pays back the risk by making
+drift detectable rather than invisible.
 
-The calculated value will be compared with `remaining_inventory` stored in `FLIGHT_INVENTORY`.
+**Atomic itinerary cancellation over per-leg cancellation.** Simpler to reason about and
+eliminates orphan legs entirely, at the cost of flexibility — a passenger who genuinely
+wants to drop only their return leg must rebook instead. Given the brief explicitly calls
+out inconsistent dependent legs as the failure mode to avoid, removing the state rather
+than managing it is the stronger answer.
 
-```text
-Stored inventory == Expected inventory
-        ↓
-       PASS
+**`BUMPED` holds inventory.** Keeps the invariant "one passenger, one seat" and keeps
+reconciliation trivially explainable. The cost is that a bumped seat is briefly
+unsellable — irrelevant in practice, since the flight is departing.
 
-Stored inventory != Expected inventory
-        ↓
-       MISMATCH
-```
+**Single service over microservices.** One deployable, one database, one transaction
+boundary. Distributed inventory would need sagas or a distributed lock and would make the
+concurrency demo far harder to prove. Not justified at this scope.
 
-This check helps identify inventory inconsistencies after bookings, cancellations, rebookings, and concurrency operations.
+**PostgreSQL specifically, not SQLite.** `SELECT ... FOR UPDATE` is a silent no-op in
+SQLite, so the concurrency tests would pass while proving nothing. Postgres is a hard
+dependency of the test suite, not a preference.
 
-## 9. Design Trade-offs
+---
 
-* **Relational database:** We chose PostgreSQL for transactional consistency and relationships between bookings and flights. This gives us strong consistency and locking support, but requires a more structured schema and makes schema changes less flexible than a NoSQL approach.
+## 11. Concurrency Test Strategy
 
-* **Stored `remaining_inventory`:** Provides simpler and faster availability checks, but introduces the possibility of the stored value becoming inconsistent with booking records. A reconciliation process is therefore included.
+The tests must actually be concurrent, which constrains how they are written:
 
-* **Row-level locking:** Prevents inconsistent inventory during concurrent bookings, but requests competing for the same flight may have to wait for the lock to be released.
+- **Real parallel connections.** Each thread gets its own engine connection. A shared
+  session serialises everything and produces a green suite that proves nothing.
+- **`threading.Barrier`** releases all N threads at the same instant, so they contend for
+  the same lock rather than arriving in sequence.
+- **Assert counts, not absence of error.** `accepted == seats_available` and
+  `rejected == N − seats_available` exactly.
+- **Reconciliation as the final assertion** of every concurrency test.
 
-* **Single service architecture:** Keeps the implementation simple and easy to test for the simulated network, but provides less independent scalability and service isolation than a distributed/microservice architecture.
-
-* **Simple bumping policy:** A deterministic priority-based rule keeps the implementation simple and testable, but does not model the more complex prioritization used by real airlines.
+Covered races: last-seat on a single leg; two different itineraries competing for one
+shared leg; concurrent booking and cancellation on the same flight; a limit change
+committed while bookings are in flight.
