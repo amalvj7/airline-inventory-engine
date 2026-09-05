@@ -20,3 +20,6 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.6",
 ]
+
+[tool.pytest.ini_options]
+markers = ["concurrency: threaded race tests; require real PostgreSQL"]
