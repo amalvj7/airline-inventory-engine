@@ -28,3 +28,10 @@ class LegUnavailable(BookingError):
 
 class InvalidItinerary(BookingError):
     """Empty leg list, duplicate flights, or otherwise malformed request."""
+
+
+
+class BookingNotFound(BookingError):
+    def __init__(self, booking_id: uuid.UUID):
+        self.booking_id = booking_id
+        super().__init__(f"Booking {booking_id} not found")
