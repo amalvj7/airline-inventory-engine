@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     database_url: str
     test_database_url: str | None = None
     log_level: str = "INFO"
-    db_echo: bool = True
+    db_echo: bool = False
 
 
 @lru_cache
