@@ -40,3 +40,10 @@ class BookingNotFound(BookingError):
 
 class InvalidOverbookingFactor(BookingError):
     """Factor was negative."""
+
+
+
+class LegNotFound(BookingError):
+    def __init__(self, leg_id: uuid.UUID):
+        self.leg_id = leg_id
+        super().__init__(f"Booking leg {leg_id} not found")
