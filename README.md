@@ -29,7 +29,7 @@ Design rationale and trade-offs: [`DESIGN.md`](./DESIGN.md).
 
 ## Stack
 
-Python 3.11 · FastAPI · SQLAlchemy 2.0 · PostgreSQL 15 · Alembic · pytest
+Python 3.12 · FastAPI · SQLAlchemy 2.0 · PostgreSQL 18 · Alembic · pytest
 Dependencies managed with [uv](https://docs.astral.sh/uv/) (`pyproject.toml` + `uv.lock`).
 
 **PostgreSQL is a hard requirement, not a preference.** `SELECT ... FOR UPDATE` is a silent
@@ -42,7 +42,7 @@ no-op in SQLite, so the concurrency tests would pass without proving anything.
 ### Prerequisites
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) — installs Python itself, so no separate Python install is needed
-- Docker & Docker Compose (for Postgres), or a local PostgreSQL 15 instance
+- Docker & Docker Compose (for Postgres), or a local PostgreSQL 15+ instance (developed and tested against 18)
 - Git
 
 ### Install
@@ -76,7 +76,7 @@ LOG_LEVEL=INFO
 ### Database
 
 ```bash
-docker compose up -d db            # Postgres 15 on :5432
+docker compose up -d db            # Postgres 18 on :5432
 uv run alembic upgrade head        # create schema
 uv run python -m app.seed          # load the simulated route network
 ```
@@ -108,8 +108,10 @@ uv run pytest -m concurrency -v    # race tests only
 uv run pytest --cov=app --cov-report=term-missing
 ```
 
-Tests use a separate database (`TEST_DATABASE_URL`) and truncate between cases. The
-concurrency suite spawns real threads on independent connections — see `DESIGN.md` §11.
+38 tests in three layers — 23 integration, 13 API contract, 2 concurrency. All run against
+a real PostgreSQL instance (`TEST_DATABASE_URL`), truncated between cases; the concurrency
+suite spawns real threads on independent connections. Full strategy, requirement coverage
+and known gaps: [`DESIGN.md`](./DESIGN.md) §11.
 
 ### Demo
 
@@ -118,8 +120,14 @@ uv run python -m demo.run              # all five scenarios, sequentially
 uv run python -m demo.run --scenario a # a single scenario
 ```
 
-Each scenario prints the pre-state, the operations performed, the post-state, and a
-reconciliation result.
+Each scenario prints the flight state before, the operations performed, and the state
+after; scenario (e) then reconciles every flight in the database against its booking
+records. **The demo truncates and re-seeds the dev database on each run.**
+
+Scenarios (a)–(d) run in sequence against the same data so that (e) reconciles across all
+of them, which is what the brief asks for. Every scenario checks its own expected
+accept/reject counts and final state, and the runner exits non-zero if any of them fail —
+so `python -m demo.run` doubles as an end-to-end acceptance check.
 
 ---
 
@@ -131,7 +139,7 @@ Full request/response schemas are generated from the Pydantic models and served 
 |---|---|---|
 | `POST` | `/flights` | Create a flight with capacity and overbooking factor |
 | `GET` | `/flights/{flight_id}` | Flight details with live inventory |
-| `GET` | `/flights` | List flights, filterable by route and date |
+| `GET` | `/flights` | List every flight with live inventory |
 | `PATCH` | `/flights/{flight_id}/overbooking` | Change the overbooking factor (takes the inventory lock) |
 | `POST` | `/passengers` | Create a passenger |
 | `POST` | `/bookings` | Book a single- or multi-leg itinerary |
@@ -140,6 +148,7 @@ Full request/response schemas are generated from the Pydantic models and served 
 | `POST` | `/bookings/{booking_id}/rebook` | Move one leg to a different flight |
 | `POST` | `/flights/{flight_id}/bump` | Resolve an oversold flight at departure |
 | `GET` | `/reconciliation` | Verify inventory against booking records |
+| `GET` | `/health` | Liveness plus a database round-trip |
 
 ### Example — multi-leg booking
 
@@ -157,16 +166,21 @@ Content-Type: application/json
 }
 ```
 
+`fare_class` is optional and defaults to `M`. Legs are numbered by their position in the
+request, so the order you send is the order the itinerary flies.
+
 ```json
 201 Created
 {
-  "booking_id": "9e8d...",
+  "id": "9e8d...",
+  "passenger_id": "b3f1...",
   "status": "CONFIRMED",
+  "created_at": "2026-09-07T09:14:22.481Z",
   "legs": [
-    { "leg_id": "...", "flight_id": "a1b2...", "sequence": 1,
-      "flight_number": "AI101", "status": "CONFIRMED" },
-    { "leg_id": "...", "flight_id": "c3d4...", "sequence": 2,
-      "flight_number": "AI205", "status": "CONFIRMED" }
+    { "id": "...", "flight_id": "a1b2...", "sequence": 1,
+      "fare_class": "Y", "status": "CONFIRMED" },
+    { "id": "...", "flight_id": "c3d4...", "sequence": 2,
+      "fare_class": "Y", "status": "CONFIRMED" }
   ]
 }
 ```
@@ -177,8 +191,9 @@ Rejection names the specific leg that failed, so the client knows which flight t
 409 Conflict
 {
   "error": "LEG_UNAVAILABLE",
-  "detail": "No inventory on flight AI205 (c3d4...)",
+  "detail": "No inventory on flight AI205 (60/60)",
   "flight_id": "c3d4...",
+  "flight_number": "AI205",
   "booking_limit": 60,
   "booked_count": 60
 }
@@ -188,12 +203,21 @@ Rejection names the specific leg that failed, so the client knows which flight t
 
 | Code | Meaning |
 |---|---|
-| `201` | Booking created |
-| `200` | Read, cancel, rebook, bump, reconciliation |
-| `400` | Malformed request — empty legs, duplicate `flight_id` in one itinerary |
-| `404` | Unknown flight, booking, or passenger |
-| `409` | No inventory on a required leg, or booking already cancelled |
-| `422` | Schema validation failure (FastAPI default) |
+| `201` | Booking, flight, or passenger created |
+| `200` | Read, cancel, rebook, bump, reconciliation, health |
+| `400` | Domain validation — duplicate `flight_id` in one itinerary, rebooking a leg onto the flight it is already on, `arrival_time` before `departure_time` |
+| `404` | Unknown flight, booking, leg, or passenger |
+| `409` | No inventory on a required leg (`LEG_UNAVAILABLE`) |
+| `422` | Schema validation — empty `legs`, negative `overbooking_factor`, malformed UUID |
+
+Cancellation is idempotent: cancelling an already-cancelled booking returns `200` and
+releases nothing, rather than erroring. See `DESIGN.md` §6.3 for why that matters to the
+counter.
+
+Domain errors carry the envelope `{"error": "<CODE>", "detail": "<message>"}`, with
+`LEG_UNAVAILABLE` adding the flight and counter fields shown above. Two path-lookup 404s
+(`GET /flights/{id}`, `GET /bookings/{id}`) still return FastAPI's bare `{"detail": ...}`;
+unifying them is listed under Future Improvements.
 
 ---
 
@@ -248,10 +272,14 @@ Left out deliberately, with reasons:
 | | Scenario | Proves |
 |---|---|---|
 | **a** | **Last-seat race** — N threads, one remaining seat, released simultaneously | Exactly 1 accept, N−1 rejects; `booked_count == booking_limit` |
-| **b** | **Shared-leg race** — two different itineraries (A→B→C and X→B) contend for one shared leg | No oversell across itineraries; both counters consistent |
+| **b** | **Shared-leg race** — COK→BLR→DEL and MAA→BLR→DEL contend for the last seat on the shared BLR→DEL leg | No oversell across itineraries; the loser holds nothing, not even its own uncontested feeder leg |
 | **c** | **Cascading cancellation** — cancel one leg of a 3-leg itinerary | All legs `CANCELLED`, inventory released on every flight, final state printed |
-| **d** | **Live limit change** — lower the overbooking factor while bookings are in flight | New limit applies immediately to pending bookings; existing bookings survive; remaining may go negative |
+| **d** | **Live limit change** — the factor is lowered while three booking threads are blocked on that flight's inventory lock | Blocked bookings re-read the *new* limit after the change commits, not the one they arrived with: 2 accept, 1 rejects |
 | **e** | **Reconciliation** — run after (a)–(d) | Stored `booked_count` matches counted consuming legs on every flight |
+
+Existing bookings surviving a lowered limit, and `remaining` going negative, are covered by
+`tests/integration/test_overbooking.py` rather than the demo — they are assertions about
+state, and the demo scenario is about the race.
 
 ---
 
@@ -265,20 +293,24 @@ airline-inventory-engine/
 │   ├── services/         # transaction boundaries: booking, cancel, rebook, bump, reconcile
 │   ├── repositories/     # locked reads and writes; never commits
 │   ├── models/           # SQLAlchemy ORM models
-│   ├── policies/         # BumpPolicy, OverbookingPolicy — swappable rules
+│   ├── policies/         # BumpPolicy — swappable bump-selection rule
+│   ├── config.py         # pydantic-settings, .env
 │   ├── database.py
-│   ├── seed.py
+│   ├── seed.py           # the simulated route network
 │   └── main.py
 ├── demo/
-│   └── run.py            # scenarios a–e
+│   ├── run.py            # scenarios a–e, self-verifying
+│   ├── concurrency.py    # barrier-released threads on independent sessions
+│   └── printing.py       # flight-state tables
 ├── tests/
-│   ├── unit/
-│   ├── integration/
+│   ├── integration/      # domain rules on a real session
+│   ├── api/              # HTTP contract via TestClient
 │   └── concurrency/      # threaded races on real connections
 ├── migrations/           # Alembic
+├── scripts/              # test-database bootstrap for Compose
 ├── docker-compose.yml
 ├── .env.example
-├── pyproject.toml        # dependencies, pytest + ruff config
+├── pyproject.toml        # dependencies and pytest config
 ├── uv.lock               # pinned resolution, committed
 ├── README.md
 └── DESIGN.md
@@ -288,15 +320,60 @@ airline-inventory-engine/
 
 ## Future Improvements
 
-*To be finalised with the submission — current known gaps:*
+What is genuinely incomplete or fragile in what was built. Deliberate exclusions are listed
+separately under Scope Limits above; these are the things I would actually fix.
 
-- **Bump auto-rebooking** is manual; automatic search for the next viable flight on the same
-  route is the obvious next step.
-- **Reconciliation is read-only.** It detects drift but does not repair it. A `--repair` mode
-  that corrects `booked_count` under a lock would be a natural follow-up.
-- **No scheduled departure processing** — bumping is triggered by API call.
-- **Lock contention is unbounded**; a hot flight serialises all bookings touching it. A
-  statement timeout plus a client-visible retry hint would make behaviour under load
-  predictable.
+**Incomplete**
+
+- **Bump resolution stops at selection.** `POST /flights/{id}/bump` marks the right
+  passengers `BUMPED` and cascades their booking to `BUMPED_PENDING`, but resolving them
+  onto another flight is a manual `rebook` call per passenger. Automatic search for the
+  next viable flight on the same route is the obvious next step, and the deterministic
+  selection policy already gives it a stable input.
+- **Rebooking keeps no history.** The leg row is repointed to the new flight
+  (`DESIGN.md` §7), so after a rebooking there is no record of the original. The
+  `REBOOKED` leg status exists in the model for the close-and-insert version of this
+  operation and is currently unused.
+- **Flight lifecycle is not enforced.** `FlightStatus` is stored but never set or checked:
+  nothing marks a flight `DEPARTED`, and nothing stops a booking on a flight whose
+  passengers have already been bumped. Departure is whatever moment you call the bump
+  endpoint.
+- **Reconciliation detects drift but does not repair it.** A `--repair` mode that corrects
+  `booked_count` from the leg count under the row lock is a small addition; leaving it
+  read-only was a deliberate first step, not a finished answer.
+
+**Fragile**
+
+- **The `Idempotency-Key` check is not itself concurrency-safe.** Two simultaneous retries
+  with the same key both miss the lookup in `create_booking`, and the second `INSERT`
+  violates the unique constraint — surfacing as an unhandled `500` instead of returning the
+  original booking. The unique constraint means no seat is double-sold — the losing
+  transaction rolls back its increment with it — but the caller gets an error it cannot
+  interpret for a booking that may well have succeeded. Catching `IntegrityError`,
+  re-selecting, and returning the existing row closes it. Sequential retries, the common
+  case, work correctly today.
+- **Two error-response shapes.** Domain exceptions return
+  `{"error": ..., "detail": ...}`; the two path-lookup 404s raised as `HTTPException`
+  return bare `{"detail": ...}`. Raising the domain exceptions there instead makes the
+  contract uniform.
+- **Lock contention is unbounded.** A hot flight serialises every booking that touches it,
+  and there is no `statement_timeout` and no client-visible retry hint, so a slow
+  transaction degrades into silent waiting rather than a fast, explicit failure.
+- **Test coverage gaps** — the limit-change race and concurrent cancel-and-book are
+  demonstrated but not asserted automatically. Enumerated in `DESIGN.md` §11.4.
+
+**Deferred**
+
 - **Optimistic concurrency** as an alternative path for low-contention flights, using the
-  existing `version` column.
+  `version` column that is currently observability-only. Pessimistic locking is right for
+  last-seat contention and wrong for a half-empty flight; a policy that picks per flight is
+  the interesting version of this system.
+- **Group bookings.** One booking is one passenger and one seat per leg, so a party of four
+  is four bookings that can partially fail. Real group inventory is an all-or-nothing claim
+  of N seats — a different concurrency problem, not a bigger one.
+
+**What I would do first, given another day:** the idempotency race, because it turns a
+retry — the exact thing the key exists to make safe — into a `500` the client cannot
+interpret; then automatic bump rebooking, because the bump path is the one requirement that
+currently ends with a human; then the two missing concurrency tests, because right now the
+demo is the only thing proving that behaviour.

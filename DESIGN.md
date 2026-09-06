@@ -41,7 +41,7 @@ cancellation policy. I3 is verified, not assumed — see §9, Reconciliation.
   │  Repository / SQLAlchemy 2.0   │   row locking (SELECT ... FOR UPDATE)
   └───────────────┬────────────────┘
                   v
-         PostgreSQL 15 (REPEATABLE READ)
+         PostgreSQL 18 (READ COMMITTED)
 ```
 
 **Why this split.** The transaction boundary sits in the service layer, never in the API
@@ -52,6 +52,16 @@ reviewable. Repositories issue locked reads and writes but never commit.
 **Why PostgreSQL.** The core requirement is a correct concurrent decrement of a shared
 counter. That is a transactional problem, and Postgres gives us `SELECT ... FOR UPDATE`
 row locks directly. See §10 for the trade-off against optimistic concurrency.
+
+**Why READ COMMITTED.** The engine keeps Postgres' default isolation level, deliberately.
+`SELECT ... FOR UPDATE` blocks a competing transaction until the lock holder commits, and
+under READ COMMITTED the blocked statement then re-reads the *newly committed* row and
+decides against fresh data. That is exactly what demo scenario (d) shows: three bookings
+queued behind an overbooking-factor change wake up and validate against the new limit,
+not the one they first saw. Under REPEATABLE READ those same transactions would instead
+abort with a serialization failure and every caller would need a retry loop — more
+machinery for no extra guarantee, because the lock already serialises the critical
+section. The isolation level is doing no work here; the lock is.
 
 **Why FastAPI.** Pydantic models double as the API contract deliverable — request and
 response schemas are generated from the same code that validates them, so `/docs` cannot
@@ -146,7 +156,7 @@ every availability check depend on it.
 |---|:---:|---|
 | `CONFIRMED` | **yes** | Normal held seat. |
 | `BUMPED` | **yes** | Denied boarding, not yet resolved. Passenger still holds this seat until rebooked or cancelled. |
-| `REBOOKED` | no | Historical record; the seat moved to a different flight. |
+| `REBOOKED` | no | Reserved for a rebooking audit trail. Not currently written — see §7. |
 | `CANCELLED` | no | Released. |
 
 **`BOOKING_LEG.status` is the sole source of truth for inventory.** `BOOKING.status` is a
@@ -215,7 +225,7 @@ the flight is simply oversold and resolves at departure through bump handling.
 POST /bookings  { passenger_id, legs: [{flight_id, fare_class}, ...] }
         |
         v
-  Validate: non-empty, no duplicate flight_id, flights SCHEDULED
+  Validate: non-empty, no duplicate flight_id, passenger and flights exist
         |
         v
   BEGIN TRANSACTION
@@ -344,8 +354,8 @@ POST /bookings/{id}/rebook  { leg_id, new_flight_id }
    v          v
  old.booked_count -= 1      ROLLBACK → 409
  new.booked_count += 1      (leg stays on original flight,
- old leg  -> REBOOKED        booking untouched)
- new leg  -> CONFIRMED
+ leg.flight_id -> new        booking untouched)
+ leg.status    -> CONFIRMED
    |
    v
  COMMIT
@@ -355,6 +365,13 @@ Two details matter. First, **both** inventory rows are locked before the availab
 — an earlier draft checked availability and then locked, which is the TOCTOU race described
 in §5.2. Second, the release and the reserve happen in the same transaction, so a failed
 rebooking cannot leave the passenger holding zero seats or two.
+
+**The leg row is repointed, not duplicated.** Rebooking updates `BOOKING_LEG.flight_id` in
+place rather than closing the old leg and inserting a new one, which keeps `sequence`
+stable and the itinerary's shape unchanged. The cost is that the passenger's flight history
+is not retained — after a rebooking there is no record of the original flight. The
+`REBOOKED` leg status exists in the model for the audit-trail version of this operation and
+is currently unused; see Future Improvements in the README.
 
 ---
 
@@ -468,7 +485,26 @@ dependency of the test suite, not a preference.
 
 ---
 
-## 11. Concurrency Test Strategy
+## 11. Test Strategy
+
+38 tests across three layers, all against a real PostgreSQL instance
+(`TEST_DATABASE_URL`), truncated between cases.
+
+### 11.1 Layers
+
+| Layer | Location | Exercises | Proves |
+|---|---|---|---|
+| Integration | `tests/integration/` (23) | service functions on a real session | the domain rules — booking, cancellation, rebooking, overbooking, bump, reconciliation |
+| Concurrency | `tests/concurrency/` (2) | real threads, real connections | the locking argument in §5.2 |
+| API contract | `tests/api/` (13) | FastAPI `TestClient` | status codes, error envelope, response shape |
+
+**There is no unit layer, deliberately.** Almost every rule in this system is a rule about
+a database transaction; a suite built on a mocked session would assert the mock's
+behaviour, not Postgres'. The one genuinely pure function, `compute_booking_limit`, is
+asserted directly in `test_overbooking.py::test_floor_rounding`. Everything else needs the
+database to mean anything.
+
+### 11.2 How the concurrency tests are written
 
 The tests must actually be concurrent, which constrains how they are written:
 
@@ -478,8 +514,34 @@ The tests must actually be concurrent, which constrains how they are written:
   the same lock rather than arriving in sequence.
 - **Assert counts, not absence of error.** `accepted == seats_available` and
   `rejected == N − seats_available` exactly.
-- **Reconciliation as the final assertion** of every concurrency test.
+- **Classify the rejections.** A rejection must be `LegUnavailable`; any other exception is
+  a failure, not a rejection, or a crashing bug reads as correct back-pressure.
+- **Verified failure mode.** The last-seat test was confirmed to fail (9 accepts on 1 seat)
+  with `FOR UPDATE` removed — see commit `8b639c3`. A concurrency test that has never been
+  seen to fail is not evidence.
 
-Covered races: last-seat on a single leg; two different itineraries competing for one
-shared leg; concurrent booking and cancellation on the same flight; a limit change
-committed while bookings are in flight.
+### 11.3 Requirement coverage
+
+| Brief requirement | Automated test | Demo |
+|---|---|---|
+| Last-seat race, correct accept/reject counts | `concurrency/test_last_seat.py` | (a) |
+| Cross-itinerary shared-leg race, no oversell | `concurrency/test_shared_leg.py` | (b) |
+| Cancellation cascading through an itinerary | `integration/test_cancellation.py`, `test_bump.py::test_cancelling_a_bumped_booking_releases_every_leg` | (c) |
+| Per-flight overbooking, live limit change | `integration/test_overbooking.py` (5) | (d) |
+| Bump resolution at departure | `integration/test_bump.py` (4) | — |
+| Reconciliation, including injected drift | `integration/test_reconciliation.py` (3) | (e) |
+| Multi-leg atomicity / rollback | `integration/test_booking.py`, `test_rebooking.py` | (b) |
+| Retry safety (`Idempotency-Key`) | `api/test_endpoints.py` | — |
+
+### 11.4 Known gaps in the suite
+
+- **The limit-change-under-lock race has no automated test.** It is demonstrated by demo
+  scenario (d), which holds the inventory lock open while booking threads queue behind it.
+  Promoting it to a test needs the same handshake the demo uses.
+- **Concurrent cancel-and-book on the same flight** is untested. The lock ordering makes it
+  the same argument as §5.2, but "the same argument" is not evidence.
+- **The concurrency tests assert counters directly, not `reconcile()`.** The integration
+  suite closes with reconciliation; the race tests assert `booked_count` and `remaining`.
+- **Migrations are not exercised by the suite.** Test schema comes from
+  `Base.metadata.create_all`, so migration drift would not fail a test. `alembic check`
+  covers it and passes.
