@@ -41,7 +41,7 @@ cancellation policy. I3 is verified, not assumed — see §9, Reconciliation.
   │  Repository / SQLAlchemy 2.0   │   row locking (SELECT ... FOR UPDATE)
   └───────────────┬────────────────┘
                   v
-         PostgreSQL 15 (REPEATABLE READ)
+         PostgreSQL 18 (REPEATABLE READ)
 ```
 
 **Why this split.** The transaction boundary sits in the service layer, never in the API

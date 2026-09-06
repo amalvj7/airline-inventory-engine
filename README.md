@@ -29,7 +29,7 @@ Design rationale and trade-offs: [`DESIGN.md`](./DESIGN.md).
 
 ## Stack
 
-Python 3.11 · FastAPI · SQLAlchemy 2.0 · PostgreSQL 15 · Alembic · pytest
+Python 3.12 · FastAPI · SQLAlchemy 2.0 · PostgreSQL 18 · Alembic · pytest
 Dependencies managed with [uv](https://docs.astral.sh/uv/) (`pyproject.toml` + `uv.lock`).
 
 **PostgreSQL is a hard requirement, not a preference.** `SELECT ... FOR UPDATE` is a silent
@@ -42,7 +42,7 @@ no-op in SQLite, so the concurrency tests would pass without proving anything.
 ### Prerequisites
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) — installs Python itself, so no separate Python install is needed
-- Docker & Docker Compose (for Postgres), or a local PostgreSQL 15 instance
+- Docker & Docker Compose (for Postgres), or a local PostgreSQL 15+ instance (developed and tested against 18)
 - Git
 
 ### Install
@@ -76,7 +76,7 @@ LOG_LEVEL=INFO
 ### Database
 
 ```bash
-docker compose up -d db            # Postgres 15 on :5432
+docker compose up -d db            # Postgres 18 on :5432
 uv run alembic upgrade head        # create schema
 uv run python -m app.seed          # load the simulated route network
 ```

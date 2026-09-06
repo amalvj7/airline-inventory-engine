@@ -3,21 +3,18 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-import app.models  # noqa: F401 — registers all models on Base.metadata
+import app.models  
 from app.config import settings
 from app.database import Base
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
+
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
+
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Target schema for 'autogenerate' support. Populated by importing app.models
-# above — a model that is never imported is invisible to autogenerate.
+
 target_metadata = Base.metadata
 
 
@@ -45,6 +42,9 @@ def run_migrations_offline() -> None:
 
     with context.begin_transaction():
         context.run_migrations()
+
+
+
 
 
 def run_migrations_online() -> None:

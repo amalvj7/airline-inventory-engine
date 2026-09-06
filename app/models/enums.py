@@ -8,7 +8,6 @@ class PassengerTier(str, enum.Enum):
 
     @property
     def bump_rank(self) -> int:
-        """Higher rank is bumped first."""
         return {"PLATINUM": 1, "GOLD": 2, "STANDARD": 3}[self.value]
 
 
@@ -44,5 +43,4 @@ class FareClass(str, enum.Enum):
 
     @property
     def bump_rank(self) -> int:
-        """Higher rank is bumped first — cheapest fare goes first."""
         return {"Y": 1, "M": 2, "B": 3}[self.value]

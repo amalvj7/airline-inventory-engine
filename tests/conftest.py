@@ -33,3 +33,26 @@ def clean_db(engine):
             )
         )
     yield
+
+
+
+
+from fastapi.testclient import TestClient
+
+from app.database import get_db
+from app.main import app as fastapi_app
+
+
+@pytest.fixture
+def client(Session):
+    def override_get_db():
+        db = Session()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    fastapi_app.dependency_overrides[get_db] = override_get_db
+    with TestClient(fastapi_app) as c:
+        yield c
+    fastapi_app.dependency_overrides.clear()

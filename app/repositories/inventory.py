@@ -10,13 +10,7 @@ from app.models import FlightInventory
 def lock_inventories(
     session: Session, flight_ids: Sequence[uuid.UUID]
 ) -> dict[uuid.UUID, FlightInventory]:
-    """
-    Acquire row-level write locks on the given flights' inventory rows.
 
-    Locks are taken in a deterministic order (sorted by flight_id) so that
-    concurrent multi-leg bookings touching overlapping legs cannot deadlock.
-    Blocks until competing transactions commit or roll back.
-    """
     ordered_ids = sorted(set(flight_ids))
 
     stmt = (
