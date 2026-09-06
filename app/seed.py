@@ -8,12 +8,21 @@ from app.models.enums import PassengerTier
 
 BASE = datetime.now(timezone.utc).replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
 
+
 FLIGHTS = [
     ("AI101", "COK", "BLR", 0, 2, 3, 0.0),
     ("AI102", "MAA", "BLR", 0, 2, 3, 0.0),
     ("AI201", "BLR", "DEL", 3, 6, 2, 0.5),
     ("AI301", "DEL", "BOM", 8, 10, 4, 0.0),
     ("AI999", "BLR", "DEL", 3, 6, 1, 0.0),
+    # (c) — own corridor, roomy so the cancel is the only thing that moves
+    ("AI111", "COK", "BLR", 0, 2, 3, 0.0),
+    ("AI211", "BLR", "DEL", 3, 6, 3, 0.0),
+    ("AI311", "DEL", "BOM", 8, 10, 3, 0.0),
+    # (d) — limit change; must start at booked 0
+    ("AI401", "BLR", "DEL", 3, 6, 2, 0.5),
+    # (f) — bump resolution, deliberately oversellable
+    ("AI501", "BLR", "DEL", 3, 6, 2, 1.0),
 ]
 
 PASSENGERS = [
@@ -22,6 +31,17 @@ PASSENGERS = [
     ("Priya Das", PassengerTier.STANDARD),
     ("Vikram Rao", PassengerTier.STANDARD),
     ("Neha Iyer", PassengerTier.STANDARD),
+    ("Arjun Pillai", PassengerTier.STANDARD),
+    ("Divya Krishnan", PassengerTier.STANDARD),
+    ("Sanjay Varma", PassengerTier.STANDARD),
+    ("Meera Suresh", PassengerTier.STANDARD),
+    ("Karthik Reddy", PassengerTier.STANDARD),
+    ("Lakshmi Warrier", PassengerTier.GOLD),
+    ("Farhan Sheikh", PassengerTier.STANDARD),
+    ("Ananya Bose", PassengerTier.PLATINUM),
+    ("Rohit Kulkarni", PassengerTier.GOLD),
+    ("Sneha Joshi", PassengerTier.STANDARD),
+    ("Imran Qureshi", PassengerTier.STANDARD),
 ]
 
 
