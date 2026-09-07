@@ -38,8 +38,8 @@ class FlightCreate(BaseModel):
     departure_time: datetime
     arrival_time: datetime
     physical_capacity: int = Field(gt=0)
-    overbooking_factor: Decimal = Field(default=Decimal("0"), ge=0)
+    overbooking_factor: Decimal = Field(default=Decimal(0), ge=0)
 
 
 class OverbookingUpdate(BaseModel):
-    overbooking_factor: Decimal = Field(ge=0, le=Decimal("2"))
+    overbooking_factor: Decimal = Field(ge=0, le=Decimal(2))

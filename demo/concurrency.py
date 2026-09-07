@@ -21,7 +21,7 @@ def run_concurrent(tasks, expect=None):
                 session.commit()
                 with lock:
                     results.append(value)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — race outcome, type unknown ahead of time
                 session.rollback()
                 with lock:
                     errors.append(exc)
@@ -54,7 +54,7 @@ def start_concurrent(tasks):
                 session.commit()
                 with lock:
                     results.append(value)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — race outcome, type unknown ahead of time
                 session.rollback()
                 with lock:
                     errors.append(exc)

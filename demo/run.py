@@ -1,3 +1,5 @@
+import time
+
 from sqlalchemy import select
 
 from app.database import SessionLocal
@@ -5,13 +7,11 @@ from app.models import Booking, Flight, Passenger
 from app.models.enums import BookingStatus, LegStatus
 from app.services.booking import LegRequest, create_booking
 from app.services.cancellation import cancel_booking
-from demo.concurrency import run_concurrent
-from demo.printing import banner, flight_rows, print_flights   
 from app.services.overbooking import set_overbooking_factor
-from demo.concurrency import run_concurrent, start_concurrent
 from app.services.reconciliation import reconcile
+from demo.concurrency import run_concurrent, start_concurrent
+from demo.printing import banner, flight_rows, print_flights
 
-import time
 
 def scenario_a():
     banner("(a) LAST-SEAT RACE — 10 threads, 1 seat on AI999")

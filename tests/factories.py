@@ -1,9 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.models import Flight, FlightInventory, Passenger
 from app.models.enums import PassengerTier
 
-BASE = datetime(2026, 10, 1, 6, 0, tzinfo=timezone.utc)
+BASE = datetime(2026, 10, 1, 6, 0, tzinfo=UTC)
 
 
 def make_flight(session, number, origin, dest, capacity, factor=0.0, hour=0):

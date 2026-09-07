@@ -2,10 +2,12 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict
 
+from app.models.enums import PassengerTier
+
 
 class PassengerCreate(BaseModel):
     name: str
-    tier: str = "STANDARD"
+    tier: PassengerTier = PassengerTier.STANDARD
 
 
 class PassengerOut(BaseModel):
@@ -13,7 +15,7 @@ class PassengerOut(BaseModel):
 
     id: uuid.UUID
     name: str
-    tier: str
+    tier: PassengerTier
 
 
 class BumpOut(BaseModel):

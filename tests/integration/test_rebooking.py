@@ -5,8 +5,8 @@ from app.models.enums import BookingStatus, LegStatus, PassengerTier
 from app.services.booking import LegRequest, create_booking
 from app.services.bump import resolve_oversold_flight
 from app.services.exceptions import LegUnavailable
-from app.services.reconciliation import reconcile
 from app.services.rebooking import rebook_leg
+from app.services.reconciliation import reconcile
 from tests.factories import make_flight, make_passenger
 
 

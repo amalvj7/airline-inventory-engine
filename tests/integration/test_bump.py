@@ -1,9 +1,10 @@
+from datetime import UTC, datetime
+
 from app.models import FlightInventory
 from app.models.enums import BookingStatus, LegStatus, PassengerTier
 from app.services.booking import LegRequest, create_booking
 from app.services.bump import resolve_oversold_flight
 from app.services.cancellation import cancel_booking
-from app.services.overbooking import set_overbooking_factor
 from app.services.reconciliation import reconcile
 from tests.factories import make_flight, make_passenger
 
@@ -43,6 +44,34 @@ def test_bumps_exactly_the_overage_lowest_priority_first(Session):
         # inventory unchanged: BUMPED still consumes
         assert s.get(FlightInventory, f.id).booked_count == 4
         assert reconcile(s).ok
+
+
+def test_recency_tiebreak_bumps_the_most_recent_booking_first(Session):
+    """Tier and fare class tie, so the sort falls through to booking recency.
+
+    Pins the direction stated in PriorityBumpPolicy's docstring: "last
+    booked, first bumped" — the passenger who booked most recently loses
+    the seat, not the one who booked first.
+    """
+    with Session() as s:
+        f = make_flight(s, "B1", "AAA", "BBB", capacity=1, factor=1.0)  # limit 2
+        earlier = make_passenger(s, "Earlier", PassengerTier.STANDARD)
+        later = make_passenger(s, "Later", PassengerTier.STANDARD)
+        s.commit()
+
+        b_earlier = create_booking(s, earlier.id, [LegRequest(f.id)])
+        b_earlier.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        s.commit()
+
+        b_later = create_booking(s, later.id, [LegRequest(f.id)])
+        b_later.created_at = datetime(2026, 1, 2, tzinfo=UTC)
+        s.commit()
+
+        result = resolve_oversold_flight(s, f.id)
+        s.commit()
+
+        assert result.overage == 1
+        assert result.bumped_leg_ids == [b_later.legs[0].id]
 
 
 def test_bump_cascades_to_downstream_legs(Session):

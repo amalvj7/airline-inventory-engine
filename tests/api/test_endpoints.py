@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-BASE = datetime(2026, 11, 1, 6, 0, tzinfo=timezone.utc)
+BASE = datetime(2026, 11, 1, 6, 0, tzinfo=UTC)
 
 
 def _flight(client, number, origin, dest, capacity, factor=0.0, hour=0):

@@ -20,6 +20,6 @@ class PriorityBumpPolicy:
         return (
             leg.booking.passenger.tier.bump_rank,
             leg.fare_class.bump_rank,
-            -leg.booking.created_at.timestamp(),
+            leg.booking.created_at.timestamp(),
             str(leg.id),
         )

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 
@@ -6,7 +6,7 @@ from app.database import SessionLocal
 from app.models import Flight, FlightInventory, Passenger
 from app.models.enums import PassengerTier
 
-BASE = datetime.now(timezone.utc).replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
+BASE = datetime.now(UTC).replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=1)
 
 
 FLIGHTS = [

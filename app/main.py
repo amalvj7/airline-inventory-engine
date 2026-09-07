@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from sqlalchemy import text
 
-import app.models  # noqa: F401
+import app.models
 from app.api import bookings, flights, ops
 from app.api.errors import register_error_handlers
 from app.database import engine

@@ -1,4 +1,3 @@
-import pytest
 
 from app.models import FlightInventory
 from app.models.enums import BookingStatus, LegStatus
