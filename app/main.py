@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -7,6 +9,11 @@ from app.api import bookings, flights, ops
 from app.api.errors import register_error_handlers
 from app.config import settings
 from app.database import engine
+
+logging.basicConfig(
+    level=settings.log_level.upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 app = FastAPI(
     title="Airline Multi-Leg Seat Inventory & Overbooking Engine",

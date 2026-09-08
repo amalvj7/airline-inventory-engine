@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import event
+
 BASE = datetime(2026, 11, 1, 6, 0, tzinfo=UTC)
 DEV_ORIGIN = "http://localhost:5173"
 
@@ -189,6 +191,91 @@ def test_bump_endpoint_resolves_oversold_flight(client):
     assert r.status_code == 200
     assert r.json()["overage"] == 1
     assert len(r.json()["bumped_leg_ids"]) == 1
+
+
+def _booking(client, flight_ids, passenger):
+    r = client.post(
+        "/bookings",
+        json={
+            "passenger_id": passenger["id"],
+            "legs": [{"flight_id": fid} for fid in flight_ids],
+        },
+    )
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_list_bookings_is_newest_first(client):
+    f = _flight(client, "A1", "AAA", "BBB", capacity=10)
+    first = _booking(client, [f["id"]], _passenger(client, "First"))
+    second = _booking(client, [f["id"]], _passenger(client, "Second"))
+
+    body = client.get("/bookings").json()
+    assert [b["id"] for b in body] == [second["id"], first["id"]]
+    assert body[0]["legs"][0]["flight_id"] == f["id"]   # legs are serialised, not dropped
+
+
+def test_list_bookings_filters_by_passenger(client):
+    f = _flight(client, "A1", "AAA", "BBB", capacity=10)
+    mine = _passenger(client, "Mine")
+    _booking(client, [f["id"]], mine)
+    _booking(client, [f["id"]], _passenger(client, "Other"))
+
+    body = client.get("/bookings", params={"passenger_id": mine["id"]}).json()
+    assert len(body) == 1
+    assert body[0]["passenger_id"] == mine["id"]
+
+
+def test_list_bookings_filters_by_flight(client):
+    f1 = _flight(client, "A1", "AAA", "BBB", capacity=10, hour=0)
+    f2 = _flight(client, "A2", "BBB", "CCC", capacity=10, hour=3)
+    _booking(client, [f1["id"]], _passenger(client, "OnF1"))
+    both = _booking(client, [f1["id"], f2["id"]], _passenger(client, "OnBoth"))
+
+    body = client.get("/bookings", params={"flight_id": f2["id"]}).json()
+    assert [b["id"] for b in body] == [both["id"]]   # only the itinerary touching f2
+
+
+def test_list_bookings_paginates(client):
+    f = _flight(client, "A1", "AAA", "BBB", capacity=10)
+    for i in range(3):
+        _booking(client, [f["id"]], _passenger(client, f"P{i}"))
+
+    page1 = client.get("/bookings", params={"limit": 2}).json()
+    page2 = client.get("/bookings", params={"limit": 2, "offset": 2}).json()
+    assert len(page1) == 2
+    assert len(page2) == 1
+    assert {b["id"] for b in page1}.isdisjoint({b["id"] for b in page2})
+
+
+def test_listing_bookings_does_not_n_plus_one(client, engine):
+    f1 = _flight(client, "A1", "AAA", "BBB", capacity=10, hour=0)
+    f2 = _flight(client, "A2", "BBB", "CCC", capacity=10, hour=3)
+    for i in range(5):
+        _booking(client, [f1["id"], f2["id"]], _passenger(client, f"P{i}"))
+
+    counter = {"n": 0}
+
+    def _count(*args, **kwargs):
+        counter["n"] += 1
+
+    event.listen(engine, "before_cursor_execute", _count)
+    try:
+        r = client.get("/bookings")
+    finally:
+        event.remove(engine, "before_cursor_execute", _count)
+
+    assert len(r.json()) == 5
+    # one SELECT for bookings + one for all legs. Lazy loading would make this 6+.
+    assert counter["n"] <= 3, f"N+1 regression: {counter['n']} queries for 5 bookings"
+
+
+def test_list_passengers_is_name_ordered(client):
+    _passenger(client, "Zoe")
+    _passenger(client, "Adam")
+
+    body = client.get("/passengers").json()
+    assert [p["name"] for p in body] == ["Adam", "Zoe"]
 
 
 def test_preflight_is_allowed_for_the_dev_origin(client):

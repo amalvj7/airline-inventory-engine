@@ -115,10 +115,10 @@ uv run pytest -m concurrency -v    # race tests only
 uv run pytest --cov=app --cov-report=term-missing
 ```
 
-38 tests in three layers — 23 integration, 13 API contract, 2 concurrency. All run against
-a real PostgreSQL instance (`TEST_DATABASE_URL`), truncated between cases; the concurrency
-suite spawns real threads on independent connections. Full strategy, requirement coverage
-and known gaps: [`DESIGN.md`](./DESIGN.md) §11.
+57 tests — 24 integration, 26 API contract, 2 concurrency, 5 config. All but the config
+tests run against a real PostgreSQL instance (`TEST_DATABASE_URL`), truncated between
+cases; the concurrency suite spawns real threads on independent connections. Full
+strategy, requirement coverage and known gaps: [`DESIGN.md`](./DESIGN.md) §11.
 
 ### Demo
 
@@ -149,7 +149,9 @@ Full request/response schemas are generated from the Pydantic models and served 
 | `GET` | `/flights` | List every flight with live inventory |
 | `PATCH` | `/flights/{flight_id}/overbooking` | Change the overbooking factor (takes the inventory lock) |
 | `POST` | `/passengers` | Create a passenger |
+| `GET` | `/passengers` | List passengers (`limit`, `offset`) |
 | `POST` | `/bookings` | Book a single- or multi-leg itinerary |
+| `GET` | `/bookings` | List bookings, newest first (`passenger_id`, `flight_id`, `limit`, `offset`) |
 | `GET` | `/bookings/{booking_id}` | Booking with all legs and statuses |
 | `POST` | `/bookings/{booking_id}/cancel` | Cancel the itinerary and release all legs |
 | `POST` | `/bookings/{booking_id}/rebook` | Move one leg to a different flight |
@@ -311,7 +313,8 @@ airline-inventory-engine/
 ├── tests/
 │   ├── integration/      # domain rules on a real session
 │   ├── api/              # HTTP contract via TestClient
-│   └── concurrency/      # threaded races on real connections
+│   ├── concurrency/      # threaded races on real connections
+│   └── test_config.py    # settings parsing; the only pure-logic tests
 ├── migrations/           # Alembic
 ├── scripts/              # test-database bootstrap for Compose
 ├── docker-compose.yml

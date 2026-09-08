@@ -1,10 +1,11 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Header
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, Header, Query
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
-from app.models import Booking
+from app.models import Booking, BookingLeg
 from app.schemas.booking import BookingCreate, BookingOut, RebookRequest
 from app.services.booking import LegRequest, create_booking
 from app.services.cancellation import cancel_booking
@@ -29,6 +30,32 @@ def book(
     db.commit()
     db.refresh(booking)
     return booking
+
+
+@router.get("", response_model=list[BookingOut])
+def list_bookings(
+    db: Session = Depends(get_db),
+    passenger_id: uuid.UUID | None = None,
+    flight_id: uuid.UUID | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    stmt = select(Booking)
+
+    if passenger_id is not None:
+        stmt = stmt.where(Booking.passenger_id == passenger_id)
+    if flight_id is not None:
+        # bookings reach flights only through their legs; EXISTS avoids the row
+        # multiplication a join would introduce before LIMIT is applied
+        stmt = stmt.where(Booking.legs.any(BookingLeg.flight_id == flight_id))
+
+    stmt = (
+        stmt.options(selectinload(Booking.legs))   # one query for every leg, not one per booking
+        .order_by(Booking.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return db.execute(stmt).scalars().all()
 
 
 @router.get("/{booking_id}", response_model=BookingOut)

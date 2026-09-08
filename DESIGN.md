@@ -487,22 +487,26 @@ dependency of the test suite, not a preference.
 
 ## 11. Test Strategy
 
-38 tests across three layers, all against a real PostgreSQL instance
-(`TEST_DATABASE_URL`), truncated between cases.
+57 tests across three database-backed layers plus one small pure-logic file. Everything
+except the config tests runs against a real PostgreSQL instance (`TEST_DATABASE_URL`),
+truncated between cases.
 
 ### 11.1 Layers
 
 | Layer | Location | Exercises | Proves |
 |---|---|---|---|
-| Integration | `tests/integration/` (23) | service functions on a real session | the domain rules — booking, cancellation, rebooking, overbooking, bump, reconciliation |
+| Integration | `tests/integration/` (24) | service functions on a real session | the domain rules — booking, cancellation, rebooking, overbooking, bump, reconciliation |
 | Concurrency | `tests/concurrency/` (2) | real threads, real connections | the locking argument in §5.2 |
-| API contract | `tests/api/` (13) | FastAPI `TestClient` | status codes, error envelope, response shape |
+| API contract | `tests/api/` (26) | FastAPI `TestClient` | status codes, error envelope, CORS, list endpoints and their query count |
+| Config | `tests/test_config.py` (5) | `Settings` in isolation | database-URL normalisation, pool sizing from the environment |
 
-**There is no unit layer, deliberately.** Almost every rule in this system is a rule about
-a database transaction; a suite built on a mocked session would assert the mock's
-behaviour, not Postgres'. The one genuinely pure function, `compute_booking_limit`, is
-asserted directly in `test_overbooking.py::test_floor_rounding`. Everything else needs the
-database to mean anything.
+**There is no unit layer for the domain, deliberately.** Almost every rule in this system
+is a rule about a database transaction; a suite built on a mocked session would assert the
+mock's behaviour, not Postgres'. The one genuinely pure domain function,
+`compute_booking_limit`, is asserted directly in `test_overbooking.py::test_floor_rounding`.
+The only other pure logic is settings parsing — string rewriting with no transaction
+semantics — and that is the one place a unit file earns its keep. Everything else needs
+the database to mean anything.
 
 ### 11.2 How the concurrency tests are written
 
