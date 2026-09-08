@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from app.services.exceptions import (
     BookingNotFound,
     FlightNotFound,
+    InvalidFlightTimes,
     InvalidItinerary,
     InvalidOverbookingFactor,
     LegNotFound,
@@ -34,6 +35,7 @@ def register_error_handlers(app: FastAPI) -> None:
         (LegNotFound, 404, "LEG_NOT_FOUND"),
         (InvalidItinerary, 400, "INVALID_ITINERARY"),
         (InvalidOverbookingFactor, 400, "INVALID_OVERBOOKING_FACTOR"),
+        (InvalidFlightTimes, 400, "INVALID_FLIGHT_TIMES"),
     ):
 
         def _make(code: int, label: str):

@@ -71,7 +71,14 @@ development:
 DATABASE_URL=postgresql+psycopg://airline:airline@localhost:5432/airline
 TEST_DATABASE_URL=postgresql+psycopg://airline:airline@localhost:5432/airline_test
 LOG_LEVEL=INFO
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
+
+`CORS_ORIGINS` is a comma-separated list of browser origins permitted to call the API. The
+defaults cover the Vite dev server (`localhost` and `127.0.0.1` are distinct origins to a
+browser, so both are listed). Add the deployed frontend origin here at deploy time —
+scheme, host and port must match exactly, with no trailing slash. Requests from `curl`,
+the test suite and Swagger UI are unaffected: CORS is enforced by browsers, not servers.
 
 ### Database
 
@@ -214,10 +221,9 @@ Cancellation is idempotent: cancelling an already-cancelled booking returns `200
 releases nothing, rather than erroring. See `DESIGN.md` §6.3 for why that matters to the
 counter.
 
-Domain errors carry the envelope `{"error": "<CODE>", "detail": "<message>"}`, with
-`LEG_UNAVAILABLE` adding the flight and counter fields shown above. Two path-lookup 404s
-(`GET /flights/{id}`, `GET /bookings/{id}`) still return FastAPI's bare `{"detail": ...}`;
-unifying them is listed under Future Improvements.
+Every failure response carries the same envelope, `{"error": "<CODE>", "detail": "<message>"}`,
+with `LEG_UNAVAILABLE` adding the flight and counter fields shown above. There is one error
+shape to parse, including on path-lookup 404s.
 
 ---
 
@@ -352,10 +358,6 @@ separately under Scope Limits above; these are the things I would actually fix.
   interpret for a booking that may well have succeeded. Catching `IntegrityError`,
   re-selecting, and returning the existing row closes it. Sequential retries, the common
   case, work correctly today.
-- **Two error-response shapes.** Domain exceptions return
-  `{"error": ..., "detail": ...}`; the two path-lookup 404s raised as `HTTPException`
-  return bare `{"detail": ...}`. Raising the domain exceptions there instead makes the
-  contract uniform.
 - **Lock contention is unbounded.** A hot flight serialises every booking that touches it,
   and there is no `statement_timeout` and no client-visible retry hint, so a slow
   transaction degrades into silent waiting rather than a fast, explicit failure.

@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -9,6 +9,7 @@ from app.models import Flight, FlightInventory
 from app.schemas.flight import FlightCreate, FlightOut, OverbookingUpdate
 from app.schemas.ops import BumpOut
 from app.services.bump import resolve_oversold_flight
+from app.services.exceptions import FlightNotFound, InvalidFlightTimes
 from app.services.overbooking import set_overbooking_factor
 
 router = APIRouter(prefix="/flights", tags=["flights"])
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/flights", tags=["flights"])
 @router.post("", response_model=FlightOut, status_code=201)
 def create_flight(payload: FlightCreate, db: Session = Depends(get_db)):
     if payload.arrival_time <= payload.departure_time:
-        raise HTTPException(400, "arrival_time must be after departure_time")
+        raise InvalidFlightTimes("arrival_time must be after departure_time")
 
     flight = Flight(
         flight_number=payload.flight_number,
@@ -49,7 +50,7 @@ def list_flights(db: Session = Depends(get_db)):
 def get_flight(flight_id: uuid.UUID, db: Session = Depends(get_db)):
     flight = db.get(Flight, flight_id)
     if flight is None:
-        raise HTTPException(404, "Flight not found")
+        raise FlightNotFound(flight_id)
     return flight
 
 

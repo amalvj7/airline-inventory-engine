@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 BASE = datetime(2026, 11, 1, 6, 0, tzinfo=UTC)
+DEV_ORIGIN = "http://localhost:5173"
 
 
 def _flight(client, number, origin, dest, capacity, factor=0.0, hour=0):
@@ -37,6 +38,23 @@ def test_create_flight_computes_booking_limit(client):
     assert body["inventory"]["booking_limit"] == 6
     assert body["inventory"]["remaining"] == 6
     assert body["inventory"]["is_oversold"] is False
+
+
+def test_arrival_before_departure_is_400(client):
+    r = client.post(
+        "/flights",
+        json={
+            "flight_number": "BAD1",
+            "origin": "AAA",
+            "destination": "BBB",
+            "departure_time": (BASE + timedelta(hours=4)).isoformat(),
+            "arrival_time": BASE.isoformat(),
+            "physical_capacity": 3,
+            "overbooking_factor": "0.0",
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["error"] == "INVALID_FLIGHT_TIMES"
 
 
 def test_multi_leg_booking_returns_ordered_legs(client):
@@ -89,6 +107,18 @@ def test_unknown_flight_is_404(client):
     )
     assert r.status_code == 404
     assert r.json()["error"] == "FLIGHT_NOT_FOUND"
+
+
+def test_unknown_flight_path_lookup_is_404(client):
+    r = client.get("/flights/00000000-0000-0000-0000-000000000000")
+    assert r.status_code == 404
+    assert r.json()["error"] == "FLIGHT_NOT_FOUND"
+
+
+def test_unknown_booking_path_lookup_is_404(client):
+    r = client.get("/bookings/00000000-0000-0000-0000-000000000000")
+    assert r.status_code == 404
+    assert r.json()["error"] == "BOOKING_NOT_FOUND"
 
 
 def test_idempotency_key_returns_the_same_booking(client):
@@ -159,6 +189,48 @@ def test_bump_endpoint_resolves_oversold_flight(client):
     assert r.status_code == 200
     assert r.json()["overage"] == 1
     assert len(r.json()["bumped_leg_ids"]) == 1
+
+
+def test_preflight_is_allowed_for_the_dev_origin(client):
+    r = client.options(
+        "/bookings",
+        headers={
+            "Origin": DEV_ORIGIN,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,idempotency-key",
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == DEV_ORIGIN
+    allowed = r.headers["access-control-allow-headers"].lower()
+    assert "content-type" in allowed
+    assert "idempotency-key" in allowed   # the retry path must survive CORS
+
+
+def test_simple_request_carries_the_allow_origin_header(client):
+    r = client.get("/flights", headers={"Origin": DEV_ORIGIN})
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == DEV_ORIGIN
+
+
+def test_error_responses_also_carry_cors_headers(client):
+    f = _flight(client, "A1", "AAA", "BBB", capacity=1)
+    p1, p2 = _passenger(client, "One"), _passenger(client, "Two")
+    client.post("/bookings", json={"passenger_id": p1["id"], "legs": [{"flight_id": f["id"]}]})
+
+    r = client.post(
+        "/bookings",
+        json={"passenger_id": p2["id"], "legs": [{"flight_id": f["id"]}]},
+        headers={"Origin": DEV_ORIGIN},
+    )
+    assert r.status_code == 409
+    # without this header the browser hides the body and the UI cannot say "sold out"
+    assert r.headers["access-control-allow-origin"] == DEV_ORIGIN
+
+
+def test_unknown_origin_is_not_granted_access(client):
+    r = client.get("/flights", headers={"Origin": "http://evil.example"})
+    assert "access-control-allow-origin" not in r.headers
 
 
 def test_reconciliation_endpoint(client):

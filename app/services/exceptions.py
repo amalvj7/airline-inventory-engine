@@ -30,6 +30,10 @@ class InvalidItinerary(BookingError):
     """Empty leg list, duplicate flights, or otherwise malformed request."""
 
 
+class InvalidFlightTimes(BookingError):
+    """arrival_time is not after departure_time."""
+
+
 
 class BookingNotFound(BookingError):
     def __init__(self, booking_id: uuid.UUID):

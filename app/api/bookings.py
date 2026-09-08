@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -8,6 +8,7 @@ from app.models import Booking
 from app.schemas.booking import BookingCreate, BookingOut, RebookRequest
 from app.services.booking import LegRequest, create_booking
 from app.services.cancellation import cancel_booking
+from app.services.exceptions import BookingNotFound
 from app.services.rebooking import rebook_leg
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
@@ -34,7 +35,7 @@ def book(
 def get_booking(booking_id: uuid.UUID, db: Session = Depends(get_db)):
     booking = db.get(Booking, booking_id)
     if booking is None:
-        raise HTTPException(404, "Booking not found")
+        raise BookingNotFound(booking_id)
     return booking
 
 
