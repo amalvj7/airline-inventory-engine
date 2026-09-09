@@ -1,130 +1,86 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, apiBaseUrl } from "./api";
-
-function formatTime(iso) {
-  return new Date(iso).toLocaleString(undefined, {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function InventoryState({ inventory }) {
-  if (inventory.is_oversold) return <span className="badge badge-oversold">oversold</span>;
-  if (inventory.remaining === 0) return <span className="badge badge-full">full</span>;
-  return <span className="badge badge-open">{inventory.remaining} left</span>;
-}
-
-/** Seats sold against the booking limit, which may exceed physical capacity. */
-function SeatBar({ inventory }) {
-  const { physical_capacity: capacity, booking_limit: limit, booked_count: booked } = inventory;
-  const scale = Math.max(limit, booked, 1);
-  return (
-    <div className="seatbar" title={`${booked} booked / ${limit} limit / ${capacity} seats`}>
-      <div className="seatbar-fill" style={{ width: `${(booked / scale) * 100}%` }} />
-      <div className="seatbar-capacity" style={{ left: `${(capacity / scale) * 100}%` }} />
-    </div>
-  );
-}
+import { BookSeat } from "./components/BookSeat";
+import { Bookings } from "./components/Bookings";
+import { Feedback } from "./components/Feedback";
+import { Flights } from "./components/Flights";
+import { AddFlight, AddPassenger, Reconciliation } from "./components/Ops";
 
 export default function App() {
   const [flights, setFlights] = useState([]);
+  const [passengers, setPassengers] = useState([]);
+  const [bookings, setBookings] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadedAt, setLoadedAt] = useState(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /** One refresh for the whole page: any action re-reads all three lists, so
+   *  inventory visibly moves the moment a booking succeeds or is cancelled. */
+  const refresh = useCallback(async () => {
     setError(null);
     try {
-      setFlights(await api.flights());
+      const [f, p, b] = await Promise.all([api.flights(), api.passengers(), api.bookings()]);
+      setFlights(f);
+      setPassengers(p);
+      setBookings(b);
       setLoadedAt(new Date());
     } catch (err) {
       setError(err);
-    } finally {
-      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    refresh().finally(() => setLoading(false));
+  }, [refresh]);
+
+  const ready = flights.length > 0;
 
   return (
     <div className="page">
       <header className="header">
         <div>
-          <h1>Seat Inventory</h1>
+          <h1>Airline Seat Inventory</h1>
           <p className="subtitle">
-            Live from <code>{apiBaseUrl}</code>
+            <code>{apiBaseUrl}</code>
             {loadedAt && <> · updated {loadedAt.toLocaleTimeString()}</>}
           </p>
         </div>
-        <button className="btn" onClick={load} disabled={loading}>
+        <button className="btn" onClick={refresh} disabled={loading}>
           {loading ? "Loading…" : "Refresh"}
         </button>
       </header>
 
-      {error && (
-        <div className="notice notice-error">
-          <strong>{error.code ?? "Request failed"}</strong>
-          <span>{error.message}</span>
+      <Feedback error={error} />
+
+      {loading && !ready && (
+        <div className="feedback">
+          Contacting the API… the first request after a while can take up to a minute while the
+          free instance wakes up.
         </div>
       )}
 
-      {loading && flights.length === 0 && (
-        <div className="notice">
-          Contacting the API… the first request after a while can take up to a minute while
-          the free instance wakes up.
-        </div>
-      )}
+      {ready && (
+        <>
+          <Flights flights={flights} onChanged={refresh} />
 
-      {flights.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Flight</th>
-              <th>Route</th>
-              <th>Departs</th>
-              <th className="num">Seats</th>
-              <th className="num">Limit</th>
-              <th className="num">Booked</th>
-              <th className="num">Remaining</th>
-              <th>Load</th>
-              <th>State</th>
-            </tr>
-          </thead>
-          <tbody>
-            {flights.map((flight) => (
-              <tr key={flight.id}>
-                <td className="mono strong">{flight.flight_number}</td>
-                <td className="mono">
-                  {flight.origin} <span className="arrow">→</span> {flight.destination}
-                </td>
-                <td className="muted">{formatTime(flight.departure_time)}</td>
-                <td className="num mono">{flight.inventory.physical_capacity}</td>
-                <td className="num mono">{flight.inventory.booking_limit}</td>
-                <td className="num mono">{flight.inventory.booked_count}</td>
-                <td className="num mono">{flight.inventory.remaining}</td>
-                <td>
-                  <SeatBar inventory={flight.inventory} />
-                </td>
-                <td>
-                  <InventoryState inventory={flight.inventory} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+          <div className="columns">
+            <BookSeat flights={flights} passengers={passengers} onChanged={refresh} />
+            <Bookings
+              bookings={bookings}
+              flights={flights}
+              passengers={passengers}
+              onChanged={refresh}
+            />
+          </div>
 
-      <footer className="footer">
-        <span>
-          <strong>Limit</strong> = floor(seats × (1 + overbooking factor)). The marker on each
-          bar is physical capacity — bookings past it are deliberate overselling.
-        </span>
-      </footer>
+          <Reconciliation />
+
+          <div className="columns">
+            <AddFlight onChanged={refresh} />
+            <AddPassenger onChanged={refresh} />
+          </div>
+        </>
+      )}
     </div>
   );
 }
