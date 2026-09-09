@@ -82,4 +82,7 @@ export const api = {
   cancel: (bookingId) => post(`/bookings/${bookingId}/cancel`),
 
   reconciliation: () => request("/reconciliation"),
+
+  /** payload is either {flight_id, clients} or {groups:[{flight_ids, clients}]} */
+  race: (payload) => post("/demo/race", payload),
 };

@@ -5,6 +5,7 @@ import { Bookings } from "./components/Bookings";
 import { Feedback } from "./components/Feedback";
 import { Flights } from "./components/Flights";
 import { AddFlight, AddPassenger, Reconciliation } from "./components/Ops";
+import { Race } from "./components/Race";
 
 export default function App() {
   const [flights, setFlights] = useState([]);
@@ -61,6 +62,8 @@ export default function App() {
 
       {ready && (
         <>
+          <Race flights={flights} onChanged={refresh} />
+
           <Flights flights={flights} onChanged={refresh} />
 
           <div className="columns">

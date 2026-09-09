@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     db_pool_size: int = 20
     db_max_overflow: int = 10
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    demo_endpoints_enabled: bool = True
 
     @field_validator("database_url", "test_database_url", mode="before")
     @classmethod

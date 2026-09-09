@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 import app.models
-from app.api import bookings, flights, ops
+from app.api import bookings, demo, flights, ops
 from app.api.errors import register_error_handlers
 from app.config import settings
 from app.database import engine
@@ -36,6 +36,7 @@ register_error_handlers(app)
 app.include_router(flights.router)
 app.include_router(bookings.router)
 app.include_router(ops.router)
+app.include_router(demo.router)
 
 
 @app.get("/health", tags=["ops"])
