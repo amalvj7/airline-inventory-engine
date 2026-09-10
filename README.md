@@ -10,6 +10,13 @@ every leg or none, and the system deliberately sells more seats than the aircraf
 
 Design rationale and trade-offs: [`DESIGN.md`](./DESIGN.md).
 
+**Live:** [UI](https://airline-ui-wvyw.onrender.com) ·
+[API docs](https://airline-inventory-engine.onrender.com/docs) ·
+[health](https://airline-inventory-engine.onrender.com/health)
+
+> Hosted on Render's free tier: the API sleeps after ~15 minutes idle, so the first request
+> can take up to a minute. The UI is static and always loads instantly.
+
 
 
 
@@ -29,8 +36,11 @@ Design rationale and trade-offs: [`DESIGN.md`](./DESIGN.md).
 
 ## Stack
 
-Python 3.12 · FastAPI · SQLAlchemy 2.0 · PostgreSQL 18 · Alembic · pytest
+**Backend** — Python 3.12 · FastAPI · SQLAlchemy 2.0 · PostgreSQL 18 · Alembic · pytest
 Dependencies managed with [uv](https://docs.astral.sh/uv/) (`pyproject.toml` + `uv.lock`).
+
+**Frontend** — React 19 · Vite 8 · no state library, no component library, no router.
+It compiles to three static files (~67 kB gzipped) and talks to the API over JSON.
 
 **PostgreSQL is a hard requirement, not a preference.** `SELECT ... FOR UPDATE` is a silent
 no-op in SQLite, so the concurrency tests would pass without proving anything.
@@ -115,10 +125,35 @@ uv run pytest -m concurrency -v    # race tests only
 uv run pytest --cov=app --cov-report=term-missing
 ```
 
-57 tests — 24 integration, 26 API contract, 2 concurrency, 5 config. All but the config
+61 tests — 24 integration, 26 API contract, 6 concurrency, 5 config. All but the config
 tests run against a real PostgreSQL instance (`TEST_DATABASE_URL`), truncated between
 cases; the concurrency suite spawns real threads on independent connections. Full
 strategy, requirement coverage and known gaps: [`DESIGN.md`](./DESIGN.md) §11.
+
+### Frontend
+
+```bash
+cd frontend
+cp .env.example .env               # VITE_API_URL — the deployed API by default
+npm install
+npm run dev                        # http://localhost:5173
+```
+
+To develop against a local backend instead, set `VITE_API_URL=http://127.0.0.1:8000` and run
+uvicorn alongside. Use `127.0.0.1` rather than `localhost`: uvicorn binds IPv4, and a browser
+resolving `localhost` to `::1` will fail with an opaque network error.
+
+`VITE_*` variables are substituted into the bundle **at build time**, not read at runtime — a
+browser cannot see server environment variables. So the value must be set wherever the build
+runs, changing it needs a rebuild rather than a restart, and anything in a `VITE_` variable is
+public by definition. Never put a secret there.
+
+If Vite reports *"Port 5173 in use, using 5174"*, stop and free the port. The API's
+`CORS_ORIGINS` allows `5173`, so a page served from `5174` is blocked on every request.
+
+```bash
+npm run build                      # -> dist/, three static files
+```
 
 ### Demo
 
@@ -157,7 +192,36 @@ Full request/response schemas are generated from the Pydantic models and served 
 | `POST` | `/bookings/{booking_id}/rebook` | Move one leg to a different flight |
 | `POST` | `/flights/{flight_id}/bump` | Resolve an oversold flight at departure |
 | `GET` | `/reconciliation` | Verify inventory against booking records |
+| `POST` | `/demo/race` | Fire N simultaneous booking attempts (see below) |
 | `GET` | `/health` | Liveness plus a database round-trip |
+
+### `POST /demo/race`
+
+A concurrency demonstration the browser can trigger. A browser cannot itself issue genuinely
+simultaneous requests, so the race runs server-side: real threads on independent connections,
+released together by a barrier — the same mechanism as `tests/concurrency/` and `demo/run.py`.
+
+It **writes real bookings**; it does not simulate. Set `DEMO_ENDPOINTS_ENABLED=false` to
+return `404` instead.
+
+```jsonc
+// last-seat race: N clients, one flight
+{ "flight_id": "…", "clients": 10 }
+
+// shared-leg race: two itineraries contending for a leg they share
+{ "groups": [
+    { "flight_ids": ["…AI101", "…AI999"], "clients": 3, "label": "COK→BLR→DEL" },
+    { "flight_ids": ["…AI102", "…AI999"], "clients": 3, "label": "MAA→BLR→DEL" }
+]}
+```
+
+The response reports per-group accept/reject counts, before/after inventory for every flight
+touched, and two invariants: `within_limit` (no flight exceeded its booking limit) and
+`consistent` (seats claimed equals accepted bookings × legs). Total clients are capped at 20.
+
+The race opens **its own connection pool**, sized to the client count. Every client holds a
+connection while blocked on the row lock, so borrowing from the request pool would either
+starve ordinary traffic or deadlock the race against itself.
 
 ### Example — multi-leg booking
 
@@ -229,6 +293,46 @@ shape to parse, including on path-lookup 404s.
 
 ---
 
+## Deployment
+
+Three Render services from this one repository:
+
+| Service | Type | Notes |
+|---|---|---|
+| `airline-db` | managed PostgreSQL 18 | migrated and seeded from a laptop over the external URL |
+| `airline-inventory-engine` | web service (Python) | root directory blank · `pip install -r requirements.txt` · `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
+| `airline-ui` | static site | root directory `frontend` · `npm install && npm run build` · publish `dist` |
+
+**Environment variables.** The API needs `DATABASE_URL` (the *internal* URL — it stays on
+Render's private network), `CORS_ORIGINS` including the deployed UI origin, and optionally
+`DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `LOG_LEVEL` / `DEMO_ENDPOINTS_ENABLED`. The static site
+needs `VITE_API_URL` at build time.
+
+**`requirements.txt` is generated, not hand-written.** Render's Python runtime installs with
+pip, which cannot read `uv.lock`. Regenerate whenever dependencies change:
+
+```bash
+uv export --no-dev --no-emit-project --no-hashes -o requirements.txt
+```
+
+**Managed Postgres hands out `postgres://`**, an alias SQLAlchemy 2 removed, and bare
+`postgresql://` resolves to psycopg2 rather than psycopg 3. A validator on `Settings`
+rewrites both to `postgresql+psycopg://`. Because `migrations/env.py` reads the same
+`Settings`, Alembic inherits the fix — nothing in `migrations/` knows about it.
+
+**Schema and seed are applied deliberately, not on boot.** An app that creates its own tables
+at startup races itself when several instances start together, and makes schema changes an
+invisible side effect of a restart:
+
+```bash
+DATABASE_URL='<external url>' uv run alembic upgrade head
+DATABASE_URL='<external url>' uv run python -m app.seed   # destructive: truncates first
+```
+
+Re-running the seed is also how demo state is reset.
+
+---
+
 ## Key Assumptions
 
 1. **One booking = one passenger = one seat per leg.** Group bookings are not modelled; a
@@ -289,6 +393,19 @@ Existing bookings surviving a lowered limit, and `remaining` going negative, are
 `tests/integration/test_overbooking.py` rather than the demo — they are assertions about
 state, and the demo scenario is about the race.
 
+### In the browser
+
+`demo/run.py` is the authoritative, self-verifying proof. The UI covers the same ground
+interactively, which is a different kind of evidence:
+
+| | In the UI |
+|---|---|
+| **a** | **Concurrency test → Last seat** — N clients, one flight |
+| **b** | **Concurrency test → Shared leg** — two itineraries, one contested leg. The flights table shows the loser's feeder claiming `+0` |
+| **c** | Book a multi-leg itinerary, then **Cancel** — every leg releases |
+| **d** | **Factor** on any flight — the limit moves, existing bookings do not. The *blocked-thread* half of (d) is script-only |
+| **e** | **Reconciliation → Verify counters** |
+
 ---
 
 ## Project Structure
@@ -298,7 +415,8 @@ airline-inventory-engine/
 ├── app/
 │   ├── api/              # FastAPI routers, HTTP concerns only
 │   ├── schemas/          # Pydantic request/response contracts
-│   ├── services/         # transaction boundaries: booking, cancel, rebook, bump, reconcile
+│   ├── services/         # transaction boundaries: booking, cancel, rebook, bump,
+│   │                     #   reconcile, race
 │   ├── repositories/     # locked reads and writes; never commits
 │   ├── models/           # SQLAlchemy ORM models
 │   ├── policies/         # BumpPolicy — swappable bump-selection rule
@@ -306,6 +424,12 @@ airline-inventory-engine/
 │   ├── database.py
 │   ├── seed.py           # the simulated route network
 │   └── main.py
+├── frontend/             # React + Vite single-page UI
+│   ├── src/
+│   │   ├── api.js        # one fetch wrapper; one ApiError for every endpoint
+│   │   ├── App.jsx       # owns all state, one shared refresh
+│   │   └── components/   # Race, Flights, BookSeat, Bookings, Passengers, Ops
+│   └── .env.example      # VITE_API_URL
 ├── demo/
 │   ├── run.py            # scenarios a–e, self-verifying
 │   ├── concurrency.py    # barrier-released threads on independent sessions
@@ -366,6 +490,21 @@ separately under Scope Limits above; these are the things I would actually fix.
   transaction degrades into silent waiting rather than a fast, explicit failure.
 - **Test coverage gaps** — the limit-change race and concurrent cancel-and-book are
   demonstrated but not asserted automatically. Enumerated in `DESIGN.md` §11.4.
+
+- **`POST /demo/race` writes to whatever database it is pointed at.** It is a demonstration,
+  not a sandbox: on the deployed instance it creates real bookings that persist until the
+  seed is re-run. It is capped at 20 clients and can be switched off entirely, but a stricter
+  version would run inside a transaction that always rolls back — which would then prove
+  rather less, since the commits are the point.
+
+- **No Dockerfile.** The API deploys via Render's native Python runtime, so the build depends
+  on that platform's runtime detection rather than something reproducible anywhere. A
+  Dockerfile is the obvious next step; it was skipped under time pressure, not on principle.
+
+- **The frontend has no polling or optimistic updates.** Two people using it simultaneously
+  each need to refresh to see the other's bookings. Deliberate for a demonstration — the
+  server's answer is the point, so the UI always waits for it — but a real client would
+  reconcile in the background.
 
 **Deferred**
 

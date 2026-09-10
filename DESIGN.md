@@ -485,9 +485,48 @@ dependency of the test suite, not a preference.
 
 ---
 
+## 10a. Demonstrating concurrency to a browser
+
+The engineering claim in §5 is about simultaneity, and a browser cannot produce it. Ten
+`fetch` calls in a loop are dispatched sequentially, subject to HTTP connection limits and
+event-loop scheduling; by the time the tenth leaves, the first has usually committed. A UI
+built that way would show ten sequential bookings and prove nothing about locking.
+
+So `POST /demo/race` runs the race **server-side**, using the same mechanism as the
+concurrency tests: one thread per client, each on its own connection and its own
+transaction, all released together by a `threading.Barrier`. The endpoint reports what
+happened rather than asserting it, and the UI renders the numbers.
+
+**It races itineraries, not flights.** A request is a list of *groups*, each a cohort of
+clients attempting the same list of legs. One group of ten on a single flight is the
+last-seat race; two groups whose itineraries overlap on one leg is the shared-leg race,
+where the interesting result is not the contested leg but the *uncontested* one — the losing
+group's feeder flight must show zero seats claimed, because a rejected multi-leg booking
+rolls back legs it had already secured.
+
+**Two invariants are computed and returned**, so the demonstration is falsifiable:
+
+- `within_limit` — no flight finished above its `booking_limit`
+- `consistent` — total seats claimed equals accepted bookings × their leg counts
+
+The second is the stronger one. It would catch a booking that claimed a leg it did not pay
+for, or a rollback that failed to release one.
+
+**It uses a dedicated connection pool**, sized to the client count and disposed afterwards.
+Each client holds a connection for the whole attempt while blocked on the row lock, so
+drawing from the request pool would either starve ordinary traffic or deadlock the race
+against its own pool ceiling — on the deployed instance the request pool is 5+2, well below
+the 20-client cap.
+
+**Cost.** It writes real bookings to whatever database it points at; that is the point, and
+it is also why it is capped, gated behind `DEMO_ENDPOINTS_ENABLED`, and why resetting demo
+state means re-running the seed. A variant that rolled back would leave nothing to observe.
+
+---
+
 ## 11. Test Strategy
 
-57 tests across three database-backed layers plus one small pure-logic file. Everything
+61 tests across three database-backed layers plus one small pure-logic file. Everything
 except the config tests runs against a real PostgreSQL instance (`TEST_DATABASE_URL`),
 truncated between cases.
 
@@ -496,7 +535,7 @@ truncated between cases.
 | Layer | Location | Exercises | Proves |
 |---|---|---|---|
 | Integration | `tests/integration/` (24) | service functions on a real session | the domain rules — booking, cancellation, rebooking, overbooking, bump, reconciliation |
-| Concurrency | `tests/concurrency/` (2) | real threads, real connections | the locking argument in §5.2 |
+| Concurrency | `tests/concurrency/` (6) | real threads, real connections | the locking argument in §5.2 |
 | API contract | `tests/api/` (26) | FastAPI `TestClient` | status codes, error envelope, CORS, list endpoints and their query count |
 | Config | `tests/test_config.py` (5) | `Settings` in isolation | database-URL normalisation, pool sizing from the environment |
 
@@ -534,8 +573,9 @@ The tests must actually be concurrent, which constrains how they are written:
 | Per-flight overbooking, live limit change | `integration/test_overbooking.py` (5) | (d) |
 | Bump resolution at departure | `integration/test_bump.py` (4) | — |
 | Reconciliation, including injected drift | `integration/test_reconciliation.py` (3) | (e) |
-| Multi-leg atomicity / rollback | `integration/test_booking.py`, `test_rebooking.py` | (b) |
+| Multi-leg atomicity / rollback | `integration/test_booking.py`, `test_rebooking.py`, `concurrency/test_race_endpoint.py::test_shared_leg_race_admits_one_itinerary_and_frees_the_loser` | (b) |
 | Retry safety (`Idempotency-Key`) | `api/test_endpoints.py` | — |
+| Race demonstration endpoint | `concurrency/test_race_endpoint.py` (4) | UI |
 
 ### 11.4 Known gaps in the suite
 
