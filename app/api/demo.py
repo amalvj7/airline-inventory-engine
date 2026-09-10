@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
 from app.schemas.demo import RaceOut, RaceRequest
+from app.services.exceptions import DemoDisabled
 from app.services.race import RaceGroup, run_race
 
 router = APIRouter(prefix="/demo", tags=["demo"])
@@ -20,7 +21,7 @@ def race(payload: RaceRequest, db: Session = Depends(get_db)):
     Disable with DEMO_ENDPOINTS_ENABLED=false.
     """
     if not settings.demo_endpoints_enabled:
-        raise HTTPException(404, "Demo endpoints are disabled")
+        raise DemoDisabled()
 
     if payload.groups:
         groups = [

@@ -2,7 +2,9 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import event
 
-BASE = datetime(2026, 11, 1, 6, 0, tzinfo=UTC)
+from app.config import settings
+
+BASE =datetime(2026, 11, 1, 6, 0, tzinfo=UTC)
 DEV_ORIGIN = "http://localhost:5173"
 
 
@@ -332,3 +334,12 @@ def test_reconciliation_endpoint(client):
     entry = next(x for x in body["flights"] if x["flight_number"] == "A1")
     assert entry["stored_booked"] == entry["expected_booked"] == 1
     assert entry["drift"] == 0
+
+
+def test_disabled_demo_endpoint_uses_the_error_envelope(client, monkeypatch):
+    monkeypatch.setattr(settings, "demo_endpoints_enabled", False)
+    f = _flight(client, "A1", "AAA", "BBB", capacity=1)
+
+    r = client.post("/demo/race", json={"flight_id": f["id"], "clients": 2})
+    assert r.status_code == 404
+    assert r.json() == {"error": "DEMO_DISABLED", "detail": "Demo endpoints are disabled"}

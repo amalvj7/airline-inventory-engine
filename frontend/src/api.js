@@ -26,11 +26,14 @@ function flattenValidationError(body) {
 }
 
 async function request(path, options = {}) {
+  // headers merged last: spreading options after them would let `headers: undefined`
+  // wipe Content-Type, and FastAPI then refuses the body as text/plain
+  const { headers, ...rest } = options;
   let res;
   try {
     res = await fetch(`${BASE}${path}`, {
-      headers: { "Content-Type": "application/json", ...(options.headers ?? {}) },
-      ...options,
+      ...rest,
+      headers: { "Content-Type": "application/json", ...(headers ?? {}) },
     });
   } catch (cause) {
     // fetch only rejects on network-level failures: unreachable, asleep, or CORS-blocked.
