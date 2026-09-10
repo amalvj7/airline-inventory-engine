@@ -79,7 +79,10 @@ export const api = {
       { passenger_id: passengerId, legs: flightIds.map((id) => ({ flight_id: id })) },
       idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
     ),
+  booking: (bookingId) => request(`/bookings/${bookingId}`),
   cancel: (bookingId) => post(`/bookings/${bookingId}/cancel`),
+  rebook: (bookingId, legId, newFlightId) =>
+    post(`/bookings/${bookingId}/rebook`, { leg_id: legId, new_flight_id: newFlightId }),
 
   reconciliation: () => request("/reconciliation"),
 

@@ -5,6 +5,7 @@ import { Bookings } from "./components/Bookings";
 import { Feedback } from "./components/Feedback";
 import { Flights } from "./components/Flights";
 import { AddFlight, AddPassenger, Reconciliation } from "./components/Ops";
+import { Passengers } from "./components/Passengers";
 import { Race } from "./components/Race";
 
 export default function App() {
@@ -75,6 +76,8 @@ export default function App() {
               onChanged={refresh}
             />
           </div>
+
+          <Passengers passengers={passengers} bookings={bookings} flights={flights} />
 
           <Reconciliation />
 
